@@ -1,6 +1,7 @@
 import { ArrowDownToLine, ArrowUpToLine, ChevronDown, ChevronUp, Focus, RotateCcw, Spline, Trash2, Wand2 } from 'lucide-react';
 import { useState } from 'react';
 import { KIND_NAMES, nodeCount, type Layer } from '../engine';
+import { FigurePicker } from './components/FigurePicker';
 import { Button } from './components/Button';
 import { Slider } from './components/Slider';
 import { Tabs } from './components/Tabs';
@@ -59,7 +60,7 @@ function Params() {
         <h3 className="section__title" id="s-geo">Corrección geométrica</h3>
         <Toggle label="Reconocer formas" description="Círculos, elipses, rectángulos, polígonos regulares y estrellas." checked={p.detectShapes} disabled={disabled} onChange={(v) => setParam('detectShapes', v)} />
         <Toggle label="Simetría" description="Detecta ejes por figura y de la composición, y los aplica." checked={p.symmetry} disabled={disabled} onChange={(v) => setParam('symmetry', v)} />
-        <Toggle label="Detectar contornos" description="Las líneas oscuras se convierten en trazos con grosor y la figura en una silueta única." checked={p.lineArt} disabled={disabled} onChange={(v) => setParam('lineArt', v)} />
+        <Toggle label="Detectar contornos" description="Separa las líneas oscuras por región y conserva su grosor." checked={p.lineArt} disabled={disabled} onChange={(v) => setParam('lineArt', v)} />
         <Toggle label="Reconstruir ocultas" description="Completa figuras tapadas por otras capas." checked={p.reconstructHidden} disabled={disabled || !p.detectShapes} onChange={(v) => setParam('reconstructHidden', v)} />
         <Slider label="Suavizado" value={p.smoothing} min={0} max={100} disabled={disabled} format={(v) => `${v}%`} onChange={(v) => setParam('smoothing', v)} />
         <Slider label="Tolerancia" value={p.tolerance} min={0.25} max={4} step={0.25} disabled={disabled} format={(v) => `${v.toFixed(2)} px`} onChange={(v) => setParam('tolerance', v)} />
@@ -93,22 +94,30 @@ function Params() {
 
 function LayerInspector() {
   const layer = useStore((s) => s.layers.find((l) => l.id === s.selectedId) ?? null);
+  const additionalIds = useStore(s => s.additionalIds);
+  const canJoin = useStore(s => s.additionalIds.length > 0 && [s.selectedId, ...s.additionalIds].every(id => s.layers.some(l => l.id === id && l.shape.type === 'strokes')));
   const index = useStore((s) => s.layers.findIndex((l) => l.id === s.selectedId));
   const count = useStore((s) => s.layers.length);
   const isolatedId = useStore((s) => s.isolatedId);
   const { updateLayer, moveLayer, deleteLayer, isolate, beginEdit } = useStore.getState();
   if (!layer) return <p className="panel__empty">Selecciona una capa en la lista o en el lienzo para editarla.</p>;
 
+  if (additionalIds.length) return <section className="section"><h3 className="section__title">{additionalIds.length + 1} capas seleccionadas</h3><Button disabled={!canJoin} onClick={useStore.getState().joinSelected}>Unir trazos</Button><p className="t-body-sm">{canJoin ? 'Se conserva el estilo y la posición en la pila del primer trazo. Los extremos cercanos se conectan.' : 'Selecciona solo capas de trazo para unirlas.'}</p></section>;
+
   const isBg = layer.kind === 'background';
-  const usingRecognized = layer.shape.type !== 'path' || (layer.recognized != null && layer.shape === layer.recognized);
+  const usingRecognized = layer.shape === layer.recognized || (layer.shape.type !== 'path' && layer.shape.type !== 'strokes');
   const nodes = nodeCount(layer.shape) + layer.holes.reduce((a, h) => a + nodeCount(h), 0);
 
   return (
     <>
       <section className="section">
+        {!isBg && <Button size="sm" variant="outline" icon={<Focus />} onClick={() => isolate(isolatedId ? null : layer.id)}>{isolatedId ? 'Salir del aislamiento' : 'Editar en aislamiento'}</Button>}
+        {!isBg && <FigurePicker action="replace" />}
+        {isolatedId && <p className="t-body-sm">Arrastra los nodos para cambiar la forma o la pieza para moverla.</p>}
+        {layer.kind === 'stroke' && !isolatedId && <p className="t-body-sm">Usa Mayús + clic para seleccionar otro trazo y unirlos.</p>}
         <div className="field">
           <label className="field__label" htmlFor="ly-name">Nombre</label>
-          <input id="ly-name" key={layer.id} className="input" defaultValue={layer.name}
+          <input id="ly-name" key={layer.id + layer.name} className="input" defaultValue={layer.name}
             onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== layer.name) updateLayer(layer.id, { name: v }); }}
             onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
         </div>
@@ -143,7 +152,7 @@ function LayerInspector() {
               checked={usingRecognized}
               onChange={(v) => updateLayer(layer.id, { shape: v ? layer.recognized! : layer.freeform })} />
           )}
-          {layer.shape.type !== 'path' && layer.shape.type !== 'strokes' && (
+          {layer.shape !== layer.freeform && layer.shape.type !== 'path' && layer.shape.type !== 'strokes' && (
             <Button variant="outline" size="sm" icon={<Spline />} onClick={() => updateLayer(layer.id, { shape: layer.freeform })}>Convertir en trazado</Button>
           )}
           {!layer.recognized && layer.shape.type === 'path' && (
@@ -165,9 +174,6 @@ function LayerInspector() {
           <Button size="sm" icon={<ArrowDownToLine />} disabled={index === 0} onClick={() => moveLayer(layer.id, 0)}>Al fondo</Button>
         </div>
         <div className="actions">
-          <Button size="sm" variant="outline" icon={<Focus />} onClick={() => isolate(isolatedId === layer.id ? null : layer.id)}>
-            {isolatedId === layer.id ? 'Mostrar todas' : 'Aislar capa'}
-          </Button>
           <Button size="sm" variant="danger" icon={<Trash2 />} onClick={() => deleteLayer(layer.id)}>Eliminar</Button>
         </div>
       </section>

@@ -1,3 +1,4 @@
+import { FigurePicker } from './components/FigurePicker';
 import { Eye, EyeOff } from 'lucide-react';
 import { useState } from 'react';
 import { KIND_NAMES, nodeCount, type Layer } from '../engine';
@@ -8,6 +9,7 @@ import { useStore } from './store';
 export function LayersPanel() {
   const layers = useStore((s) => s.layers);
   const selectedId = useStore((s) => s.selectedId);
+  const additionalIds = useStore(s => s.additionalIds);
   const open = useStore((s) => s.panel === 'layers');
   const { select, updateLayer, moveLayer } = useStore.getState();
   const [drag, setDrag] = useState<{ id: string; over: string | null; before: boolean } | null>(null);
@@ -53,10 +55,11 @@ export function LayersPanel() {
         {layers.length > 0 && <span className="count">{layers.length}</span>}
       </div>
       <div className="panel__body">
+        <FigurePicker action="add" />
         {layers.length === 0 ? (
           <p className="panel__empty">Importa una imagen para detectar sus figuras. Cada figura se convierte en una capa vectorial independiente, ordenada de afuera hacia adentro.</p>
         ) : (
-          <List role="listbox" aria-label="Capas de la imagen">
+          <List aria-multiselectable role="listbox" aria-label="Capas de la imagen">
             {rows.map((l) => {
               const cls = ['layer-row', drag?.over === l.id && drag.id !== l.id ? (drag.before ? 'drop-before' : 'drop-after') : ''].join(' ');
               return (
@@ -68,7 +71,7 @@ export function LayersPanel() {
                   role="option"
                   tabIndex={l.id === selectedId || (!selectedId && l === rows[0]) ? 0 : -1}
                   interactive
-                  selected={l.id === selectedId}
+                  selected={l.id === selectedId || additionalIds.includes(l.id)}
                   style={{ paddingLeft: 12 + Math.min(l.depth, 6) * 12 }}
                   draggable={renaming !== l.id}
                   onDragStart={(e) => { e.dataTransfer.effectAllowed = 'move'; setDrag({ id: l.id, over: null, before: true }); }}
@@ -80,7 +83,7 @@ export function LayersPanel() {
                   }}
                   onDrop={(e) => { e.preventDefault(); drop(); }}
                   onDragEnd={() => setDrag(null)}
-                  onClick={() => select(l.id)}
+                  onClick={e => select(l.id, e.shiftKey || e.ctrlKey || e.metaKey)}
                   onDoubleClick={() => setRenaming(l.id)}
                   onKeyDown={(e) => onKey(e, l)}
                   leading={<span className="swatch" style={{ background: l.fill !== 'none' ? l.fill : 'transparent', boxShadow: l.stroke ? `inset 0 0 0 ${l.fill === 'none' ? 2 : 3}px ${l.stroke.color}` : undefined }} />}
