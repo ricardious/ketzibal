@@ -13,3 +13,8 @@ createRoot(document.getElementById('root')!).render(
     <App />
   </StrictMode>,
 );
+
+if (import.meta.env.DEV) {
+  // acceso a la tienda desde la consola durante el desarrollo
+  void import('./ui/store').then(({ useStore }) => ((window as unknown as { ketzibal: unknown }).ketzibal = useStore));
+}
