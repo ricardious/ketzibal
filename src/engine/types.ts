@@ -149,6 +149,8 @@ export type ProgressStage =
 
 export interface Progress {
   stage: ProgressStage;
+  /** Nuevos contornos en coordenadas del original. */
+  contours?: string;
   /** 0–1 */
   value: number;
 }

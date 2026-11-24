@@ -7,6 +7,7 @@ import { recognize } from './shapes';
 import { detectGlobalSymmetry, detectSymmetry, mirrorLoop, mirrorShape, reflectPoint, symmetrizeHalf } from './symmetry';
 import type { BezierLoop, BezierPath, Layer, Progress, RasterImage, Shape, ShapeKind, SymmetryAxis, Vec, VectorizeParams, VectorizeResult } from './types';
 import { convexHull, dist, inPolygon, segDist } from './vec';
+import { shapeToD } from './svg';
 import { KIND_NAMES } from './names';
 
 type OnProgress = (p: Progress) => void;
@@ -275,9 +276,17 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     tol = Math.max(tol, ink.width * 0.1);
   }
 
-  for (let oi = 0; oi < order.length; oi++) {
-    const c = order[oi];
-    if (oi % 8 === 0) onProgress({ stage: 'Reconstruyendo figuras', value: 0.55 + 0.43 * (oi / order.length) });
+  // La detección recorre las piezas de arriba abajo. El rango original sigue
+  // determinando las oclusiones y el orden de pintura en el SVG.
+  const scan = ink ? [...order].sort((a, b) => {
+    if (a >= cc.count || b >= cc.count) return Number(a >= cc.count) - Number(b >= cc.count);
+    return st.y0[a] - st.y0[b] || st.x0[a] - st.x0[b];
+  }) : order;
+  const byRegion = new Map<number, Layer>();
+  let preview = '';
+  let lastPreview = -Infinity;
+  for (let oi = 0; oi < scan.length; oi++) {
+    const c = scan[oi];
     const fill = q.hex[labelOf(c)];
     let layer: Omit<Layer, 'id' | 'name'>;
     if (c === bg) {
@@ -289,7 +298,19 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       layer = res;
     }
     const n = (counters[layer.kind] = (counters[layer.kind] ?? 0) + 1);
-    layers.push({ ...layer, id: idOf(c), name: layer.kind === 'background' ? 'Fondo' : `${KIND_NAMES[layer.kind]} ${n}` });
+    byRegion.set(c, { ...layer, id: idOf(c), name: layer.kind === 'background' ? 'Fondo' : `${KIND_NAMES[layer.kind]} ${n}` });
+    if (ink && c !== bg && c < cc.count) {
+      preview += [layer.shape, ...layer.holes].map(shape => shapeToD(scaleShape(shape, 1 / scale))).join('');
+    }
+    if (performance.now() - lastPreview >= 32 || oi === scan.length - 1) {
+      onProgress({ stage: 'Reconstruyendo figuras', value: 0.55 + 0.41 * (oi + 1) / scan.length, contours: preview });
+      lastPreview = performance.now();
+      preview = '';
+    }
+  }
+  for (const c of order) {
+    const layer = byRegion.get(c);
+    if (layer) layers.push(layer);
   }
 
   function base(kind: ShapeKind, shape: Shape, freeform: Shape, fill: string, parent: number, depth: number, area: number): Omit<Layer, 'id' | 'name'> {
