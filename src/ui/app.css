@@ -108,7 +108,7 @@
 .axis--global { stroke: var(--secondary); }
 
 .split-handle {
-  position: absolute; top: 0; bottom: 0; width: 24px; margin-left: -12px; cursor: ew-resize; z-index: 2;
+  position: absolute; width: 24px; margin-left: -12px; cursor: ew-resize; z-index: 2;
   display: flex; justify-content: center;
 }
 .split-handle::before { content: ''; width: 2px; height: 100%; background: var(--primary); }

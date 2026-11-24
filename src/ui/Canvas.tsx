@@ -224,19 +224,16 @@ export function Canvas() {
               </g>
             )}
           </svg>
-          {view === 'split' && (
-            <>
-              <div className="split-handle" style={{ left: `${split * 100}%`, transform: `scale(${1 / s}, 1)`, transformOrigin: 'center' }} onPointerDown={onSplitDown} role="slider" aria-label="Divisor de comparación" aria-valuenow={Math.round(split * 100)} tabIndex={0}
-                onKeyDown={(e) => { if (e.key === 'ArrowLeft') set({ split: Math.max(0, split - 0.02) }); if (e.key === 'ArrowRight') set({ split: Math.min(1, split + 0.02) }); }}>
-                <span><SplitSquareHorizontal /></span>
-              </div>
-            </>
-          )}
         </div>
       )}
 
       {source && view === 'split' && (
         <>
+          <div className="split-handle" style={{ left: tx + split * iw * s, top: ty, height: ih * s }} onPointerDown={onSplitDown}
+            role="slider" aria-label="Divisor de comparación" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(split * 100)} tabIndex={0}
+            onKeyDown={(e) => { if (e.key === 'ArrowLeft') set({ split: Math.max(0, split - 0.02) }); if (e.key === 'ArrowRight') set({ split: Math.min(1, split + 0.02) }); }}>
+            <span><SplitSquareHorizontal /></span>
+          </div>
           <span className="split-label" style={{ left: Math.max(12, tx + 12) }}>Original</span>
           <span className="split-label" style={{ right: Math.max(12, size.w - (tx + iw * s) + 12) }}>Vectorizado</span>
         </>

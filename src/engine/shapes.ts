@@ -412,6 +412,14 @@ function validCompletion(s: Shape, inp: FitInput): boolean {
  * Usa solo los puntos de borde visibles; si hay oclusión intenta completar la figura.
  */
 export function recognize(inp: FitInput): FitResult | null {
+  const r = recognizeImpl(inp);
+  if (r) return r;
+  // sin compleción posible: la figura visible tal cual también puede ser una primitiva
+  if (inp.visible.some((v) => !v)) return recognizeImpl({ ...inp, visible: ones(inp.pts.length), allowCompletion: false });
+  return null;
+}
+
+function recognizeImpl(inp: FitInput): FitResult | null {
   const { pts, visible, area, tol } = inp;
   const n = pts.length;
   if (n < 12 || area < 20) return null;
