@@ -2,7 +2,7 @@ import { traceContours, type Contour } from './contour';
 import { detectCorners, fitClosed, fitOpen, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
 import { quantize } from './quantize';
 import { cleanupLabels, components, growInto, majoritySmooth, maskHoles, regionMask, regionStats, type Components, type LocalMask, type RegionStats } from './regions';
-import { chainRuns, detectInk, skeletonPaths, thin, type Ink } from './lineart';
+import { centerStroke, chainRuns, detectBrownInk, detectInk, distanceTransform, skeletonPaths, thin, type Ink } from './lineart';
 import { recognize } from './shapes';
 import { detectGlobalSymmetry, detectSymmetry, mirrorLoop, mirrorShape, reflectPoint, symmetrizeHalf } from './symmetry';
 import type { BezierLoop, BezierPath, Layer, Progress, RasterImage, Shape, ShapeKind, SymmetryAxis, Vec, VectorizeParams, VectorizeResult } from './types';
@@ -60,10 +60,24 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   // Dibujo lineal: la tinta se retira del mapa de etiquetas y los rellenos crecen hasta su línea media.
   let ink: Ink | null = null;
   if (params.lineArt) {
-    const cc0 = components(q.labels, W, H);
-    ink = detectInk(cc0, regionStats(cc0, W, H), q.lab, W, H);
+    ink = detectBrownInk(img, q.labels, q.hex.length);
+    const rgbMask = ink?.mask;
+    if (!ink) {
+      const cc0 = components(q.labels, W, H);
+      ink = detectInk(cc0, regionStats(cc0, W, H), label => q.lab[label * 3] < 0.45, W, H);
+    }
     if (ink) {
-      growInto(q.labels, ink.mask.slice(), W, H, q.lab, false);
+      const replace = ink.mask.slice();
+      // El JPEG deja una franja del color cuantizado de la tinta alrededor
+      // del umbral RGB. Repartirla entre los rellenos evita capas residuales.
+      if (rgbMask) {
+        for (let i = 0; i < replace.length; i++) {
+          if (q.labels[i] !== ink.label || replace[i]) continue;
+          const x = i % W;
+          if ((x > 0 && rgbMask[i - 1]) || (x + 1 < W && rgbMask[i + 1]) || rgbMask[i - W] || rgbMask[i + W]) replace[i] = 1;
+        }
+      }
+      growInto(q.labels, replace, W, H, q.lab, false);
       majoritySmooth(q.labels, ink.mask, W, H, q.hex.length, Math.max(2, Math.round(ink.width * 0.6)), 3);
       cleanupLabels(q.labels, q.lab, W, H, Math.max(2, params.minArea));
     }
@@ -550,6 +564,36 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
 
   // Simetría global: figuras gemelas a ambos lados del eje se reflejan exactamente.
   if (globalAxis) mirrorTwins(layers, globalAxis);
+
+  if (ink && ink.branched.some(label => label >= 0)) {
+    const mask = Uint8Array.from(ink.branched, label => Number(label >= 0));
+    const radius = distanceTransform(mask, W, H);
+    const skeleton = thin(mask, W, H);
+    let n = 0;
+    for (const points of skeletonPaths(skeleton, W, H, Math.max(2, ink.width * 0.45))) {
+      // En una unión el radio inscrito incluye las ramas vecinas. La mediana
+      // a lo largo del tramo estima el grosor sin engordar todo el trazo.
+      const radii = points.map(([x, y]) => radius[Math.floor(y) * W + Math.floor(x)]).sort((a, b) => a - b);
+      const width = Math.max(1, 2 * radii[Math.floor(radii.length / 2)] - 0.7);
+      const first = points[0], last = points[points.length - 1];
+      const closed = first[0] === last[0] && first[1] === last[1];
+      const smooth = Math.min(sigma, width * 0.22);
+      const error = Math.min(tol, Math.max(0.4, width * 0.09));
+      const centered = centerStroke(points, mask, W, width);
+      let path: BezierPath;
+      if (closed) {
+        const ring = smoothClosed(centered.slice(0, -1), smooth);
+        path = { ...fitClosed(ring, [], error), closed: true };
+      } else {
+        const run = smoothOpen(centered, smooth);
+        path = { start: run[0], segs: fitOpen(run, error) };
+      }
+      const shape: Shape = { type: 'strokes', paths: [path] };
+      const layer = base('stroke', shape, shape, 'none', -1, 0, points.length * width);
+      n++;
+      layers.push({ ...layer, stroke: { width, color: q.hex[ink.label] }, name: `Contorno ${n}`, id: `tinta-${n}` });
+    }
+  }
 
   // Escalar a coordenadas de la imagen original
   const inv = 1 / scale;

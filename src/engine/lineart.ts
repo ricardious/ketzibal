@@ -1,5 +1,5 @@
-import type { Components, RegionStats } from './regions';
-import type { Vec } from './types';
+import { components, regionStats, type Components, type RegionStats } from './regions';
+import type { RasterImage, Vec } from './types';
 
 /**
  * Detección de dibujo lineal ("tinta"): regiones oscuras y delgadas de grosor casi
@@ -9,6 +9,8 @@ import type { Vec } from './types';
 export interface Ink {
   /** 1 = píxel de trazo. */
   mask: Uint8Array;
+  /** Etiqueta original de la tinta ramificada, -1 fuera de ella. */
+  branched: Int32Array;
   /** Grosor del trazo en píxeles de trabajo. */
   width: number;
   /** Etiqueta de paleta de la tinta. */
@@ -59,12 +61,36 @@ export function distanceTransform(mask: Uint8Array, W: number, H: number, comp?:
   return d;
 }
 
-export function detectInk(cc: Components, st: RegionStats, lab: Float32Array, W: number, H: number): Ink | null {
+/** Aísla la tinta marrón en RGB antes de que la paleta mezcle un borde
+ * con un relleno oscuro. Los rellenos compactos se conservan como figuras. */
+export function detectBrownInk(img: RasterImage, paletteLabels: Int32Array, paletteSize: number): Ink | null {
+  const labels = new Int32Array(paletteLabels.length).fill(-1);
+  const votes = new Uint32Array(paletteSize);
+  let count = 0;
+  for (let i = 0; i < labels.length; i++) {
+    const p = 4 * i;
+    const red = img.data[p], green = img.data[p + 1], blue = img.data[p + 2];
+    if (img.data[p + 3] < 128 || red - blue <= 12 || green >= 65 || blue >= 55) continue;
+    labels[i] = 0;
+    if (paletteLabels[i] >= 0) votes[paletteLabels[i]]++;
+    count++;
+  }
+  if (!count || count < labels.length * 0.004) return null;
+  let label = 0;
+  for (let i = 1; i < votes.length; i++) if (votes[i] > votes[label]) label = i;
+  // Usar la paleta solo para el color de salida. La geometría conserva la máscara RGB.
+  const cc = components(labels, img.width, img.height);
+  const ink = detectInk(cc, regionStats(cc, img.width, img.height), () => true, img.width, img.height);
+  if (!ink) return null;
+  for (let i = 0; i < ink.branched.length; i++) if (ink.branched[i] >= 0) ink.branched[i] = label;
+  return { ...ink, label };
+}
+
+export function detectInk(cc: Components, st: RegionStats, dark: (label: number) => boolean, W: number, H: number): Ink | null {
   // candidatos: componentes de etiquetas oscuras
-  const dark = (l: number) => l >= 0 && lab[l * 3] < 0.45;
   const cand = new Uint8Array(cc.count);
   let any = false;
-  for (let c = 0; c < cc.count; c++) if (dark(cc.label[c]) && st.area[c] >= 30) { cand[c] = 1; any = true; }
+  for (let c = 0; c < cc.count; c++) if (cc.label[c] >= 0 && dark(cc.label[c]) && st.area[c] >= 30) { cand[c] = 1; any = true; }
   if (!any) return null;
   const m = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) if (cand[cc.comp[i]]) m[i] = 1;
@@ -93,9 +119,12 @@ export function detectInk(cc: Components, st: RegionStats, lab: Float32Array, W:
   const sm = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) if (stroke[cc.comp[i]]) sm[i] = 1;
   const sk = thin(sm, W, H);
+  const branches = new Uint8Array(cc.count);
+  const nb = NB(W);
   const skLen = new Float64Array(cc.count);
   for (let i = W; i < W * H - W; i++) {
     if (!sk[i]) continue;
+    if (crossing(sk, i, nb) >= 3) branches[cc.comp[i]] = 1;
     let l = 0;
     if (sk[i + 1]) l += 1; if (sk[i + W]) l += 1;
     if (sk[i + W + 1]) l += Math.SQRT2; if (sk[i + W - 1]) l += Math.SQRT2;
@@ -106,17 +135,18 @@ export function detectInk(cc: Components, st: RegionStats, lab: Float32Array, W:
     // los extremos redondeados aportan ≈ media línea cada uno a la longitud
     x.w = len > 0 ? x.a / (len + (x.a / Math.max(1, len))) : 2 * Math.sqrt(x.a / Math.PI);
   }
-  const total = widths.reduce((s, x) => s + x.a, 0);
-  // la tinta debe ser una parte apreciable del dibujo
-  if (total < W * H * 0.004) return null;
-  widths.sort((a, b) => a.w - b.w);
-  let acc = 0, width = widths[0].w;
-  for (const x of widths) { acc += x.a; if (acc >= total / 2) { width = x.w; break; } }
   const byLabel = new Map<number, number>();
   for (const x of widths) byLabel.set(x.l, (byLabel.get(x.l) ?? 0) + x.a);
-  const label = [...byLabel.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const [label, total] = [...byLabel.entries()].sort((a, b) => b[1] - a[1])[0];
+  if (total < W * H * 0.004) return null;
+  const samples = widths.filter(x => x.l === label).sort((a, b) => a.w - b.w);
+  let acc = 0, width = samples[0].w;
+  for (const x of samples) { acc += x.a; if (acc >= total / 2) { width = x.w; break; } }
   const mask = new Uint8Array(W * H);
-  for (let i = 0; i < W * H; i++) if (stroke[cc.comp[i]]) mask[i] = 1;
+  for (let i = 0; i < mask.length; i++) {
+    const c = cc.comp[i];
+    if (stroke[c] && cc.label[c] === label) mask[i] = 1;
+  }
   // núcleos gruesos pegados a la tinta (zonas rellenas del color del trazo) no son trazo
   const d2 = distanceTransform(mask, W, H, cc.comp);
   const coreT = width * 0.75 + 1.5;
@@ -133,8 +163,35 @@ export function detectInk(cc: Components, st: RegionStats, lab: Float32Array, W:
     }
     queue = next;
   }
-  for (let i = 0; i < W * H; i++) if (blob[i]) mask[i] = 0;
-  return { mask, width: Math.max(1, width), label };
+  const branched = new Int32Array(W * H).fill(-1);
+  for (let i = 0; i < mask.length; i++) {
+    if (mask[i] && branches[cc.comp[i]]) branched[i] = label;
+    else if (blob[i]) mask[i] = 0;
+  }
+  return { mask, branched, width: Math.max(1, width), label };
+}
+
+/** Centra la curva entre ambos bordes de la tinta. Cerca de un cruce,
+ * una sección demasiado ancha pertenece a varias ramas y se descarta. */
+export function centerStroke(points: Vec[], mask: Uint8Array, W: number, width: number): Vec[] {
+  const span = Math.max(2, Math.round(width * 0.5));
+  const limit = width * 1.4;
+  const inside = (x: number, y: number) => x >= 0 && x < W && mask[Math.floor(y) * W + Math.floor(x)] === 1;
+  const reach = (p: Vec, dx: number, dy: number, max: number) => {
+    let d = 0;
+    while (d < max && inside(p[0] + dx * d, p[1] + dy * d)) d += 0.5;
+    return d;
+  };
+  return points.map((p, i) => {
+    const a = points[Math.max(0, i - span)], b = points[Math.min(points.length - 1, i + span)];
+    const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (!length) return p;
+    const dx = (b[0] - a[0]) / length, dy = (b[1] - a[1]) / length;
+    const left = reach(p, -dy, dx, limit), right = reach(p, dy, -dx, limit);
+    if (left + right > width * 1.35) return p;
+    const shift = (left - right) / 2;
+    return [p[0] - dy * shift, p[1] + dx * shift];
+  });
 }
 
 /** Adelgazamiento de Zhang–Suen. Devuelve el esqueleto de 1 px. */
