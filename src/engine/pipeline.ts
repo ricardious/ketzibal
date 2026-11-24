@@ -6,21 +6,10 @@ import { recognize } from './shapes';
 import { detectGlobalSymmetry, detectSymmetry, mirrorLoop, mirrorShape, reflectPoint, symmetrizeHalf } from './symmetry';
 import type { BezierLoop, Layer, Progress, RasterImage, Shape, ShapeKind, SymmetryAxis, Vec, VectorizeParams, VectorizeResult } from './types';
 import { convexHull, dist, inPolygon, segDist } from './vec';
+import { KIND_NAMES } from './names';
 
 type OnProgress = (p: Progress) => void;
 
-export const KIND_NAMES: Record<ShapeKind, string> = {
-  background: 'Fondo',
-  circle: 'Círculo',
-  ellipse: 'Elipse',
-  rect: 'Rectángulo',
-  square: 'Cuadrado',
-  triangle: 'Triángulo',
-  'regular-polygon': 'Polígono regular',
-  star: 'Estrella',
-  polygon: 'Polígono',
-  path: 'Trazado',
-};
 
 /** Reduce la imagen por promedio de área. */
 function downscale(img: RasterImage, maxSide: number): { img: RasterImage; s: number } {
