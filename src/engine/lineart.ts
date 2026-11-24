@@ -75,7 +75,7 @@ export function detectInk(cc: Components, st: RegionStats, lab: Float32Array, W:
   for (let i = 0; i < W * H; i++) if (m[i]) vals[cc.comp[i]].push(dt[i]);
   const maxW = Math.max(4, Math.min(W, H) * 0.04);
   const stroke = new Uint8Array(cc.count);
-  const widths: { w: number; a: number; l: number }[] = [];
+  const widths: { w: number; a: number; l: number; c: number }[] = [];
   for (let c = 0; c < cc.count; c++) {
     if (!cand[c]) continue;
     const v = vals[c].sort((a, b) => a - b);
@@ -85,10 +85,27 @@ export function detectInk(cc: Components, st: RegionStats, lab: Float32Array, W:
     // en un trazo la distancia máxima ≈ la mitad del grosor; en un disco ≈ el grosor medio
     if (w <= maxW && p98 <= w * 0.85 + 1 && p98 < 3.2 * Math.max(1, p50)) {
       stroke[c] = 1;
-      widths.push({ w: 2 * p98 - 0.5, a: st.area[c], l: cc.label[c] });
+      widths.push({ w: 0, a: st.area[c], l: cc.label[c], c });
     }
   }
   if (widths.length === 0) return null;
+  // grosor = área / longitud del esqueleto (la distancia chaflán lo sobrestima)
+  const sm = new Uint8Array(W * H);
+  for (let i = 0; i < W * H; i++) if (stroke[cc.comp[i]]) sm[i] = 1;
+  const sk = thin(sm, W, H);
+  const skLen = new Float64Array(cc.count);
+  for (let i = W; i < W * H - W; i++) {
+    if (!sk[i]) continue;
+    let l = 0;
+    if (sk[i + 1]) l += 1; if (sk[i + W]) l += 1;
+    if (sk[i + W + 1]) l += Math.SQRT2; if (sk[i + W - 1]) l += Math.SQRT2;
+    skLen[cc.comp[i]] += l;
+  }
+  for (const x of widths) {
+    const len = skLen[x.c];
+    // los extremos redondeados aportan ≈ media línea cada uno a la longitud
+    x.w = len > 0 ? x.a / (len + (x.a / Math.max(1, len))) : 2 * Math.sqrt(x.a / Math.PI);
+  }
   const total = widths.reduce((s, x) => s + x.a, 0);
   // la tinta debe ser una parte apreciable del dibujo
   if (total < W * H * 0.004) return null;
@@ -235,4 +252,109 @@ export function skeletonPaths(s: Uint8Array, W: number, H: number, minSpur: numb
     .filter((p) => !((p.a === 1) !== (p.b === 1) && len(p.px) < minSpur)) // espolón: extremo → unión
     .filter((p) => len(p.px) >= 2)
     .map((p) => p.px.map((i) => [(i % W) + 0.5, Math.floor(i / W) + 0.5] as Vec));
+}
+
+/**
+ * Encadena los tramos del esqueleto a través de los cruces. En un cruce el esqueleto se
+ * deforma (puentes cortos y codos): se quitan los puentes, se recortan los extremos cercanos
+ * a la unión y se empalman las ramas que continúan en la misma dirección. Los extremos que
+ * no continúan (uniones en T) se prolongan en línea recta hasta la unión.
+ * Devuelve polilíneas; las cerradas repiten el primer punto al final.
+ */
+export function chainRuns(input: Vec[][], width: number): Vec[][] {
+  const d2 = (a: Vec, b: Vec) => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2;
+  const J = width * 1.8;
+  let runs = input.filter((r) => r.length >= 2).map((r) => r.slice());
+  const endsNear = (p: Vec, self: number, rs: Vec[][], r: number) =>
+    rs.some((q, j) => j !== self && (d2(q[0], p) <= r * r || d2(q[q.length - 1], p) <= r * r));
+  const arcLen = (r: Vec[]) => { let s = 0; for (let i = 1; i < r.length; i++) s += Math.sqrt(d2(r[i - 1], r[i])); return s; };
+  // puentes: tramos cortos con ambos extremos en una unión
+  runs = runs.filter((r, i) => !(arcLen(r) < width * 1.5 && endsNear(r[0], i, runs, 2.5) && endsNear(r[r.length - 1], i, runs, 2.5)));
+
+  type End = { run: number; at: 0 | 1; p: Vec; dir: Vec; trim: number; mate: number };
+  const isClosed = (r: Vec[]) => r.length > 8 && d2(r[0], r[r.length - 1]) <= 2.5;
+  const ends: End[] = [];
+  const T = width * 0.8;
+  const trimmed = runs.map((r, i) => {
+    if (isClosed(r)) return r;
+    let a = 0, b = r.length - 1;
+    const junction = (p: Vec) => endsNear(p, i, runs, J);
+    const L = arcLen(r);
+    const maxTrim = Math.min(T, L * 0.35);
+    const ja = junction(r[0]), jb = junction(r[r.length - 1]);
+    if (ja) { let s = 0; while (a < b - 2 && s < maxTrim) { s += Math.sqrt(d2(r[a], r[a + 1])); a++; } }
+    if (jb) { let s = 0; while (b > a + 2 && s < maxTrim) { s += Math.sqrt(d2(r[b], r[b - 1])); b--; } }
+    const out = r.slice(a, b + 1);
+    const dirAt = (from: number, step: 1 | -1): Vec => {
+      let k = from, s = 0;
+      while (k + step >= 0 && k + step < out.length && s < width * 1.5) { s += Math.sqrt(d2(out[k], out[k + step])); k += step; }
+      const v: Vec = [out[from][0] - out[k][0], out[from][1] - out[k][1]];
+      const n = Math.hypot(v[0], v[1]) || 1;
+      return [v[0] / n, v[1] / n];
+    };
+    if (ja) ends.push({ run: i, at: 0, p: out[0], dir: dirAt(0, 1), trim: maxTrim, mate: -1 });
+    if (jb) ends.push({ run: i, at: 1, p: out[out.length - 1], dir: dirAt(out.length - 1, -1), trim: maxTrim, mate: -1 });
+    return out;
+  });
+
+  // empalmes por buena continuación
+  const pairs: { a: number; b: number; s: number }[] = [];
+  const R = width * 3.5;
+  for (let a = 0; a < ends.length; a++) for (let b = a + 1; b < ends.length; b++) {
+    const A = ends[a], B = ends[b];
+    if (A.run === B.run) continue;
+    const dd = d2(A.p, B.p);
+    if (dd > R * R) continue;
+    const opp = -(A.dir[0] * B.dir[0] + A.dir[1] * B.dir[1]);
+    if (opp < 0.75) continue;
+    const n = Math.sqrt(dd) || 1;
+    const v: Vec = [(B.p[0] - A.p[0]) / n, (B.p[1] - A.p[1]) / n];
+    const al = Math.min(v[0] * A.dir[0] + v[1] * A.dir[1], -(v[0] * B.dir[0] + v[1] * B.dir[1]));
+    if (dd > 4 && al < 0.6) continue;
+    pairs.push({ a, b, s: opp + (dd > 4 ? al : 1) - Math.sqrt(dd) / R });
+  }
+  pairs.sort((x, y) => y.s - x.s);
+  for (const { a, b } of pairs) if (ends[a].mate < 0 && ends[b].mate < 0) { ends[a].mate = b; ends[b].mate = a; }
+
+  // extremos sin pareja: prolongación recta hasta la unión
+  for (const e of ends) {
+    if (e.mate >= 0) continue;
+    const r = trimmed[e.run];
+    const q: Vec = [e.p[0] + e.dir[0] * e.trim, e.p[1] + e.dir[1] * e.trim];
+    if (e.at === 0) r.unshift(q); else r.push(q);
+  }
+
+  // recorrer cadenas
+  const endOf = new Map<string, End>();
+  for (const e of ends) endOf.set(`${e.run}:${e.at}`, e);
+  const used = new Uint8Array(trimmed.length);
+  const out: Vec[][] = [];
+  const follow = (start: number, startAt: 0 | 1) => {
+    // recorre desde el extremo `startAt` del tramo inicial hacia el otro
+    const pts: Vec[] = [];
+    let run = start, from: 0 | 1 = startAt;
+    for (;;) {
+      used[run] = 1;
+      const r = trimmed[run];
+      const seq = from === 0 ? r : [...r].reverse();
+      pts.push(...seq);
+      const exitAt: 0 | 1 = from === 0 ? 1 : 0;
+      const e = endOf.get(`${run}:${exitAt}`);
+      if (!e || e.mate < 0) break;
+      const m = ends[e.mate];
+      if (used[m.run]) { if (m.run === start) pts.push(pts[0]); break; }
+      run = m.run; from = m.at;
+    }
+    return pts;
+  };
+  // primero las cadenas abiertas (empiezan en un extremo sin pareja)
+  for (let i = 0; i < trimmed.length; i++) {
+    if (used[i]) continue;
+    for (const at of [0, 1] as const) {
+      const e = endOf.get(`${i}:${at}`);
+      if (!e || e.mate < 0) { if (!used[i]) out.push(follow(i, at)); break; }
+    }
+  }
+  for (let i = 0; i < trimmed.length; i++) if (!used[i]) out.push(follow(i, 0));
+  return out;
 }
