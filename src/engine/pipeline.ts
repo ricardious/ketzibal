@@ -779,11 +779,12 @@ function scaleShape(s: Shape, k: number): Shape {
 }
 
 function scaleLayer(l: Layer, k: number): Layer {
+  const shape = scaleShape(l.shape, k);
   return {
     ...l,
-    shape: scaleShape(l.shape, k),
-    freeform: scaleShape(l.freeform, k),
-    recognized: l.recognized && scaleShape(l.recognized, k),
+    shape,
+    freeform: l.freeform === l.shape ? shape : scaleShape(l.freeform, k),
+    recognized: l.recognized === l.shape ? shape : l.recognized && scaleShape(l.recognized, k),
     holes: l.holes.map((h) => scaleShape(h, k)),
     area: l.area * k * k,
     stroke: l.stroke && { ...l.stroke, width: l.stroke.width * k },
