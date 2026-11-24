@@ -1,3 +1,5 @@
+import { makeFigure, replaceFigure, type FigureType } from './lib/figures';
+import { joinStrokes } from '../engine/join';
 import { create } from 'zustand';
 import { CancelledError, DEFAULT_PARAMS, toSvg, Vectorizer, type Layer, type Progress, type SymmetryAxis, type VectorizeParams } from '../engine';
 import { loadImageFile, type SourceImage } from './lib/image';
@@ -11,6 +13,7 @@ interface State {
   params: VectorizeParams;
   status: 'idle' | 'loading' | 'processing' | 'done' | 'error';
   progress: Progress | null;
+  contours: string;
   error: string | null;
 
   layers: Layer[];
@@ -20,6 +23,7 @@ interface State {
   accuracy: number | null;
 
   selectedId: string | null;
+  additionalIds: string[];
   isolatedId: string | null;
   past: Layer[][];
   future: Layer[][];
@@ -39,7 +43,10 @@ interface State {
   resetParams: () => void;
   run: () => Promise<void>;
 
-  select: (id: string | null) => void;
+  select: (id: string | null, additive?: boolean) => void;
+  joinSelected: () => void;
+  applyDrawing: (pieces: Layer[], original?: Layer) => void;
+  editFigure: (type: FigureType, action: 'add' | 'replace') => void;
   isolate: (id: string | null) => void;
   updateLayer: (id: string, patch: Partial<Layer>, record?: boolean) => void;
   beginEdit: () => void;
@@ -85,6 +92,7 @@ export const useStore = create<State>((set, get) => {
     source: null,
     params: { ...DEFAULT_PARAMS },
     status: 'idle',
+    contours: '',
     progress: null,
     error: null,
     layers: [],
@@ -92,7 +100,7 @@ export const useStore = create<State>((set, get) => {
     globalAxis: null,
     stats: null,
     accuracy: null,
-    selectedId: null,
+    selectedId: null, additionalIds: [],
     isolatedId: null,
     past: [],
     future: [],
@@ -112,7 +120,7 @@ export const useStore = create<State>((set, get) => {
         const src = await loadImageFile(file);
         const old = get().source;
         if (old) URL.revokeObjectURL(old.url);
-        set({ source: src, layers: [], past: [], future: [], selectedId: null, isolatedId: null, accuracy: null, zoom: 1, pan: [0, 0] });
+        set({ source: src, layers: [], past: [], future: [], selectedId: null, additionalIds: [], isolatedId: null, accuracy: null, zoom: 1, pan: [0, 0] });
         await get().run();
       } catch (e) {
         set({ status: 'error', error: e instanceof Error ? e.message : String(e) });
@@ -133,12 +141,13 @@ export const useStore = create<State>((set, get) => {
     async run() {
       const { source, params } = get();
       if (!source) return;
-      set({ status: 'processing', progress: { stage: 'Preparando imagen', value: 0 }, error: null });
+      set({ status: 'processing', contours: '', progress: { stage: 'Preparando imagen', value: 0 }, error: null });
       try {
-        const r = await vectorizer.run(source.raster, params, (progress) => set({ progress }));
+        const r = await vectorizer.run(source.raster, params, (progress) => set(state => ({ progress, contours: state.contours + (progress.contours ?? '') })));
         const sel = get().selectedId;
         set({
           status: 'done',
+          contours: '',
           progress: null,
           layers: r.layers,
           palette: r.palette,
@@ -147,7 +156,7 @@ export const useStore = create<State>((set, get) => {
           past: [],
           future: [],
           selectedId: r.layers.some((l) => l.id === sel) ? sel : null,
-          isolatedId: null,
+          additionalIds: [], isolatedId: null,
           accuracy: null,
         });
         scheduleAccuracy();
@@ -157,8 +166,49 @@ export const useStore = create<State>((set, get) => {
       }
     },
 
-    select: (id) => set({ selectedId: id }),
-    isolate: (id) => set({ isolatedId: id }),
+    select(id, additive) {
+      const { selectedId, additionalIds, isolatedId } = get();
+      if (isolatedId && !id) return;
+      if (!additive || !id || !selectedId || isolatedId) {
+        set({ selectedId: id, additionalIds: [], isolatedId: isolatedId ? id : null });
+        return;
+      }
+      if (selectedId === id) set({ selectedId: additionalIds[0] ?? null, additionalIds: additionalIds.slice(1) });
+      else set({ additionalIds: additionalIds.includes(id) ? additionalIds.filter(i => i !== id) : [...additionalIds, id] });
+    },
+    isolate: (id) => set({ isolatedId: id, additionalIds: [], ...(id ? { selectedId: id } : {}) }),
+    editFigure(type, action) {
+      const { source, layers, selectedId, status, additionalIds } = get();
+      if (!source || status !== 'done') return;
+      const current = layers.find(l => l.id === selectedId);
+      const size = Math.min(source.width, source.height) / 5;
+      let figure: Layer;
+      if (action === 'replace') {
+        if (!current || current.kind === 'background' || additionalIds.length) return;
+        figure = replaceFigure(current, type);
+        commit(layers.map(l => l === current ? figure : l));
+      } else {
+        figure = makeFigure(type, [source.width / 2, source.height / 2], size, type === 'ellipse' || type === 'rect' ? size * 0.7 : size);
+        commit([...layers, figure]);
+      }
+      set({ selectedId: figure.id, isolatedId: figure.id, additionalIds: [], panel: null });
+    },
+    applyDrawing(pieces, original) {
+      const { layers, status, isolatedId } = get();
+      if (status !== 'done' || !pieces.length || (original && !layers.includes(original))) return;
+      commit(original ? layers.flatMap(l => l === original ? pieces : [l]) : [...layers, ...pieces]);
+      set({ selectedId: pieces[0].id, additionalIds: [], isolatedId: !original && isolatedId ? pieces[0].id : null, view: 'vector' });
+    },
+    joinSelected() {
+      const { layers, selectedId, additionalIds } = get();
+      const ids = new Set([selectedId, ...additionalIds]);
+      const members = layers.filter(l => ids.has(l.id));
+      const primary = members.find(l => l.id === selectedId);
+      if (!primary || members.length < 2 || members.some(l => l.shape.type !== 'strokes' || !l.stroke)) return;
+      const joined = joinStrokes(primary, members);
+      commit(layers.filter(l => !ids.has(l.id) || l.id === primary.id).map(l => l.id === primary.id ? joined : l));
+      set({ additionalIds: [] });
+    },
 
     beginEdit() {
       const { layers, past } = get();
@@ -181,20 +231,22 @@ export const useStore = create<State>((set, get) => {
     deleteLayer(id) {
       const { selectedId, isolatedId } = get();
       commit(get().layers.filter((l) => l.id !== id));
-      set({ selectedId: selectedId === id ? null : selectedId, isolatedId: isolatedId === id ? null : isolatedId });
+      set({ additionalIds: [], selectedId: selectedId === id ? null : selectedId, isolatedId: isolatedId === id ? null : isolatedId });
     },
 
     undo() {
       const { past, layers, future } = get();
       if (!past.length) return;
-      set({ layers: past[past.length - 1], past: past.slice(0, -1), future: [layers, ...future] });
+      const previous = past[past.length - 1];
+      const sel = previous.some(l => l.id === get().selectedId) ? get().selectedId : null;
+      set({ additionalIds: [], isolatedId: get().isolatedId === sel ? sel : null, selectedId: sel, layers: previous, past: past.slice(0, -1), future: [layers, ...future] });
       scheduleAccuracy();
     },
 
     redo() {
       const { past, layers, future } = get();
       if (!future.length) return;
-      set({ layers: future[0], future: future.slice(1), past: [...past, layers] });
+      set({ additionalIds: [], isolatedId: null, selectedId: future[0].some(l => l.id === get().selectedId) ? get().selectedId : null, layers: future[0], future: future.slice(1), past: [...past, layers] });
       scheduleAccuracy();
     },
 
