@@ -1,10 +1,11 @@
 import { traceContours, type Contour } from './contour';
 import { detectCorners, fitClosed, fitOpen, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
 import { quantize } from './quantize';
-import { cleanupLabels, components, maskHoles, regionMask, regionStats, type Components, type LocalMask, type RegionStats } from './regions';
+import { cleanupLabels, components, growInto, maskHoles, regionMask, regionStats, type Components, type LocalMask, type RegionStats } from './regions';
+import { detectInk, distanceTransform, skeletonPaths, thin, type Ink } from './lineart';
 import { recognize } from './shapes';
 import { detectGlobalSymmetry, detectSymmetry, mirrorLoop, mirrorShape, reflectPoint, symmetrizeHalf } from './symmetry';
-import type { BezierLoop, Layer, Progress, RasterImage, Shape, ShapeKind, SymmetryAxis, Vec, VectorizeParams, VectorizeResult } from './types';
+import type { BezierLoop, BezierPath, Layer, Progress, RasterImage, Shape, ShapeKind, SymmetryAxis, Vec, VectorizeParams, VectorizeResult } from './types';
 import { convexHull, dist, inPolygon, segDist } from './vec';
 import { KIND_NAMES } from './names';
 
@@ -55,6 +56,17 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   const q = quantize(img, params.colors);
   onProgress({ stage: 'Limpiando regiones', value: 0.3 });
   cleanupLabels(q.labels, q.lab, W, H, Math.max(2, params.minArea), img.data);
+
+  // Dibujo lineal: la tinta se retira del mapa de etiquetas y los rellenos crecen hasta su línea media.
+  let ink: Ink | null = null;
+  if (params.lineArt) {
+    const cc0 = components(q.labels, W, H);
+    ink = detectInk(cc0, regionStats(cc0, W, H), q.lab, W, H);
+    if (ink) {
+      growInto(q.labels, ink.mask.slice(), W, H, q.lab, false);
+      cleanupLabels(q.labels, q.lab, W, H, Math.max(2, params.minArea));
+    }
+  }
   const cc = components(q.labels, W, H);
   const st = regionStats(cc, W, H);
 
@@ -95,20 +107,72 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     for (const e of enclosers[c]) if (best < 0 || nodes[e].filledArea < nodes[best].filledArea) best = e;
     nodes[c].parent = best >= 0 ? best : bg;
   }
+
+  // Siluetas: si una figura está delimitada por tinta, su unión completa es la capa base.
+  const virt: { mask: LocalMask; label: number; area: number }[] = [];
+  const total = () => cc.count + virt.length;
+  const labelOf = (c: number) => (c < cc.count ? cc.label[c] : virt[c - cc.count].label);
+  const areaOf = (c: number) => (c < cc.count ? st.area[c] : virt[c - cc.count].area);
+  const pendingAbsorb: number[] = [];
+  if (ink) {
+    const fg = new Int32Array(W * H);
+    for (let i = 0; i < W * H; i++) fg[i] = cc.comp[i] !== bg && q.labels[i] >= 0 ? 1 : 0;
+    const figs = components(fg, W, H);
+    const fst = regionStats(figs, W, H);
+    for (let f = 0; f < figs.count; f++) {
+      if (figs.label[f] !== 1 || fst.area[f] < W * H * 0.002) continue;
+      const regionArea = new Map<number, number>();
+      let edge = 0, inked = 0;
+      for (let y = fst.y0[f]; y <= fst.y1[f]; y++) for (let x = fst.x0[f]; x <= fst.x1[f]; x++) {
+        const i = y * W + x;
+        if (figs.comp[i] !== f) continue;
+        regionArea.set(cc.comp[i], (regionArea.get(cc.comp[i]) ?? 0) + 1);
+        const border = x === 0 || y === 0 || x === W - 1 || y === H - 1 || figs.comp[i - 1] !== f || figs.comp[i + 1] !== f || figs.comp[i - W] !== f || figs.comp[i + W] !== f;
+        if (border) { edge++; if (ink.mask[i]) inked++; }
+      }
+      if (regionArea.size < 2 || inked < edge * 0.5) continue;
+      // color dominante de la figura
+      const byLabel = new Map<number, number>();
+      for (const [c, a] of regionArea) byLabel.set(cc.label[c], (byLabel.get(cc.label[c]) ?? 0) + a);
+      const silLabel = [...byLabel.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      const mask = regionMask(figs, fst, f, W);
+      const v = cc.count + virt.length;
+      virt.push({ mask, label: silLabel, area: fst.area[f] });
+      nodes.push({ c: v, parent: bg, children: [], filledArea: fst.area[f], realHoles: new Set(), rank: -1 });
+      enclosers.push([]);
+      const contents = new Map<number, Map<number, number>>();
+      const { hole, count } = maskHoles(mask);
+      for (let p = 0; p < hole.length && count; p++) {
+        if (!hole[p]) continue;
+        nodes[v].filledArea++;
+        const o = cc.comp[(mask.oy + Math.floor(p / mask.w)) * W + mask.ox + (p % mask.w)];
+        let mm = contents.get(hole[p]);
+        if (!mm) contents.set(hole[p], (mm = new Map()));
+        mm.set(o, (mm.get(o) ?? 0) + 1);
+      }
+      holeContents.push(contents);
+      for (const [c] of regionArea) {
+        if (nodes[c].parent !== bg && nodes[c].parent >= 0) continue;
+        nodes[c].parent = v;
+        if (cc.label[c] === silLabel) pendingAbsorb.push(c);
+      }
+    }
+  }
   // Huecos reales: el contenido tiene el color de lo que hay debajo de la figura.
   // Se evalúa de afuera hacia adentro para no encadenar absorciones.
-  const absorbed = new Uint8Array(cc.count);
+  const absorbed = new Uint8Array(total());
+  for (const c of pendingAbsorb) absorbed[c] = 1;
   const liveParent = (c: number) => {
     let p = nodes[c].parent;
     while (p >= 0 && absorbed[p]) p = nodes[p].parent;
     return p;
   };
   const depthOf = (c: number) => { let d = 0; for (let p = nodes[c].parent; p >= 0; p = nodes[p].parent) d++; return d; };
-  const byDepth = [...Array(cc.count).keys()].map((c) => [c, depthOf(c)]).sort((x, y) => x[1] - y[1]).map((x) => x[0]);
+  const byDepth = [...Array(total()).keys()].map((c) => [c, depthOf(c)]).sort((x, y) => x[1] - y[1]).map((x) => x[0]);
   for (const c of byDepth) {
-    if (absorbed[c] || cc.label[c] < 0) continue;
+    if (absorbed[c] || labelOf(c) < 0) continue;
     const P = liveParent(c);
-    const under = P >= 0 ? cc.label[P] : -1;
+    const under = P >= 0 ? labelOf(P) : -1;
     for (const [h, mm] of holeContents[c]) {
       let tot = 0, same = 0;
       const direct: number[] = [];
@@ -124,11 +188,11 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     }
   }
   // Re-asignar hijos de regiones absorbidas a la figura del hueco.
-  for (let c = 0; c < cc.count; c++) nodes[c].parent = liveParent(c);
-  const isLayer = (c: number) => !absorbed[c] && cc.label[c] >= 0;
-  for (let c = 0; c < cc.count; c++) if (isLayer(c) && c !== bg && nodes[c].parent >= 0) nodes[nodes[c].parent].children.push(c);
+  for (let c = 0; c < total(); c++) nodes[c].parent = liveParent(c);
+  const isLayer = (c: number) => !absorbed[c] && labelOf(c) >= 0;
+  for (let c = 0; c < total(); c++) if (isLayer(c) && c !== bg && nodes[c].parent >= 0) nodes[nodes[c].parent].children.push(c);
   const roots: number[] = [];
-  for (let c = 0; c < cc.count; c++) if (isLayer(c) && (c === bg || nodes[c].parent < 0)) roots.push(c);
+  for (let c = 0; c < total(); c++) if (isLayer(c) && (c === bg || nodes[c].parent < 0)) roots.push(c);
 
   // Orden Z entre hermanas: la que muestra un borde cóncavo hacia la otra queda debajo.
   const bndCache = new Map<number, { b: Int32Array; hull: Vec[] }>();
@@ -143,6 +207,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     const above = new Map<number, Set<number>>(); // a → regiones que van encima de a
     const indeg = new Map<number, number>(sib.map((c) => [c, 0]));
     for (const a of sib) {
+      if (a >= cc.count) continue;
       for (const [b] of st.adj[a]) {
         if (b <= a || !set.has(b)) continue;
         const A = bndOf(a), B = bndOf(b);
@@ -176,7 +241,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   const rootOrder = bg >= 0 ? [bg, ...orderSiblings(roots.filter((r) => r !== bg))] : orderSiblings(roots);
   for (const r of rootOrder) visit(r);
   // los hijos del fondo se ordenan como hermanas de nivel superior
-  const rank = new Int32Array(cc.count).fill(-1);
+  const rank = new Int32Array(total()).fill(-1);
   for (const c of order) rank[c] = nodes[c].rank;
 
   // Eje de simetría global de la composición
@@ -186,17 +251,18 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   const layers: Layer[] = [];
   const idOf = (c: number) => `capa-${nodes[c].rank + 1}`;
   const counters: Partial<Record<ShapeKind, number>> = {};
+  const strokedRecords: { c: number; pts: Vec[]; outside: Int32Array; rank: number; width: number }[] = [];
   const sigma = 0.6 + (params.smoothing / 100) * 3.4;
   const tol = Math.max(0.25, params.tolerance);
 
   for (let oi = 0; oi < order.length; oi++) {
     const c = order[oi];
     if (oi % 8 === 0) onProgress({ stage: 'Reconstruyendo figuras', value: 0.55 + 0.43 * (oi / order.length) });
-    const fill = q.hex[cc.label[c]];
+    const fill = q.hex[labelOf(c)];
     let layer: Omit<Layer, 'id' | 'name'>;
     if (c === bg) {
       const shape: Shape = { type: 'rect', cx: W / 2, cy: H / 2, w: W, h: H, rx: 0, rotation: 0 };
-      layer = base('background', shape, shape, fill, -1, 0, st.area[c]);
+      layer = base('background', shape, shape, fill, -1, 0, areaOf(c));
     } else {
       const res = buildLayer(c);
       if (!res) continue;
@@ -208,7 +274,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
 
   function base(kind: ShapeKind, shape: Shape, freeform: Shape, fill: string, parent: number, depth: number, area: number): Omit<Layer, 'id' | 'name'> {
     return {
-      kind, shape, freeform, fill, opacity: 1, visible: true, holes: [], dx: 0, dy: 0,
+      kind, shape, freeform, fill, stroke: null, opacity: 1, visible: true, holes: [], dx: 0, dy: 0,
       parentId: parent >= 0 ? idOf(parent) : null, depth, area, reconstructed: false, symmetry: null, fitError: 0,
     };
   }
@@ -228,6 +294,14 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       if (!v) occludedN++;
     }
     const occluded = occludedN > 0;
+    // ¿el borde es tinta? → la capa lleva contorno con grosor
+    let stroke: Layer['stroke'] = null;
+    if (ink) {
+      let k = 0;
+      for (let i = 0; i < outer.pts.length; i++) { const o = outer.outside[i]; if (o >= 0 && ink.mask[o]) k++; }
+      if (k >= outer.pts.length * 0.8) stroke = { color: q.hex[ink.label], width: ink.width };
+      if (stroke) strokedRecords.push({ c, pts: outer.pts, outside: outer.outside, rank: myRank, width: ink.width });
+    }
     let depth = 0;
     for (let p = nodes[c].parent; p >= 0; p = nodes[p].parent) depth++;
 
@@ -298,8 +372,9 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       holes.push(hs ?? { type: 'path', loop: contourToLoop(h.pts) });
     }
 
-    const l = base(kind, shape, freeform, q.hex[cc.label[c]], nodes[c].parent, depth, st.area[c]);
-    return { ...l, holes, recognized, reconstructed, symmetry: axis, fitError };
+    if (c >= cc.count && kind === 'path') kind = 'silhouette';
+    const l = base(kind, shape, freeform, q.hex[labelOf(c)], nodes[c].parent, depth, areaOf(c));
+    return { ...l, stroke, holes, recognized, reconstructed, symmetry: axis, fitError };
   }
 
   function contourToLoop(raw: Vec[]): BezierLoop {
@@ -349,8 +424,8 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   }
 
   function filledMask(c: number): LocalMask {
-    const m = regionMask(cc, st, c, W);
-    if (!nodes[c].filledArea || nodes[c].filledArea === st.area[c]) return m;
+    const m = c < cc.count ? regionMask(cc, st, c, W) : { ...virt[c - cc.count].mask, data: virt[c - cc.count].mask.data.slice() };
+    if (!nodes[c].filledArea || nodes[c].filledArea === areaOf(c)) return m;
     const { hole } = maskHoles(m);
     for (let p = 0; p < hole.length; p++) if (hole[p] && !nodes[c].realHoles.has(hole[p])) m.data[p] = 1;
     return m;
@@ -373,6 +448,97 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       if (near) grown[y * w + x] = 1;
     }
     return { ox, oy, w, h, data: grown };
+  }
+
+  if (ink) {
+    onProgress({ stage: 'Reconstruyendo figuras', value: 0.97 });
+    const built = new Set(layers.map((l) => l.id));
+    const stroked = new Uint8Array(total());
+    for (const r of strokedRecords) if (built.has(idOf(r.c))) stroked[r.c] = 1;
+    layers.push(...freeStrokes(ink, strokedRecords.filter((r) => stroked[r.c]), stroked));
+  }
+
+  /**
+   * Trazos libres: el esqueleto de la tinta que no coincide con el contorno de una capa con trazo
+   * (bigotes, boca, líneas interiores) se ajusta como trazados abiertos con grosor.
+   */
+  function freeStrokes(ink: Ink, recs: typeof strokedRecords, stroked: Uint8Array): Layer[] {
+    const covered = new Uint8Array(W * H);
+    for (const r of recs) {
+      const rad = Math.max(1.5, r.width * 0.65);
+      for (let i = 0; i < r.pts.length; i++) {
+        const o = r.outside[i];
+        const [mx, my] = r.pts[i];
+        // píxel interior (reflejo del exterior respecto al punto medio de la arista)
+        const ox = o >= 0 ? (o % W) + 0.5 : mx, oy = o >= 0 ? Math.floor(o / W) + 0.5 : my;
+        const ix = Math.floor(2 * mx - ox), iy = Math.floor(2 * my - oy);
+        if (ix >= 0 && iy >= 0 && ix < W && iy < H) {
+          const ic = cc.comp[iy * W + ix];
+          // una capa superior sin trazo tapa media línea: allí se mantiene el trazo libre
+          if (rank[ic] > r.rank && !stroked[ic]) continue;
+        }
+        const R = Math.ceil(rad);
+        for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+          if (dx * dx + dy * dy > rad * rad) continue;
+          const x = Math.floor(mx + dx), y = Math.floor(my + dy);
+          if (x >= 0 && y >= 0 && x < W && y < H) covered[y * W + x] = 1;
+        }
+      }
+    }
+    const skel = thin(ink.mask, W, H);
+    const dt = distanceTransform(ink.mask, W, H);
+    const minLen = Math.max(3, ink.width * 0.8);
+    const runs: { pts: Vec[]; idx: number[] }[] = [];
+    for (const path of skeletonPaths(skel, W, H, ink.width * 1.5)) {
+      let cur: Vec[] = [];
+      const flush = () => { if (cur.length >= minLen) runs.push({ pts: cur, idx: cur.map((p) => Math.floor(p[1]) * W + Math.floor(p[0])) }); cur = []; };
+      for (const p of path) {
+        if (covered[Math.floor(p[1]) * W + Math.floor(p[0])]) flush();
+        else cur.push(p);
+      }
+      flush();
+    }
+    // agrupar tramos que se tocan en un mismo trazo
+    const parent = runs.map((_, i) => i);
+    const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+    const ends = runs.map((r) => [r.pts[0], r.pts[r.pts.length - 1]]);
+    for (let a = 0; a < runs.length; a++) for (let b = a + 1; b < runs.length; b++) {
+      if (ends[a].some((p) => ends[b].some((q) => Math.abs(p[0] - q[0]) <= 2 && Math.abs(p[1] - q[1]) <= 2))) parent[find(a)] = find(b);
+    }
+    const groups = new Map<number, number[]>();
+    runs.forEach((_, i) => { const g = find(i); if (!groups.has(g)) groups.set(g, []); groups.get(g)!.push(i); });
+    const out: Layer[] = [];
+    let n = 0;
+    const ssig = Math.max(1, sigma * 0.8, ink.width * 0.35);
+    for (const idxs of groups.values()) {
+      const paths: BezierPath[] = [];
+      const widths: number[] = [];
+      let len = 0;
+      for (const i of idxs) {
+        const r = runs[i];
+        const closed = r.pts.length > 8 && Math.abs(r.pts[0][0] - r.pts[r.pts.length - 1][0]) <= 1.5 && Math.abs(r.pts[0][1] - r.pts[r.pts.length - 1][1]) <= 1.5;
+        if (closed) {
+          const ring = r.pts.slice(0, -1);
+          const loop = fitClosed(smoothClosed(ring, ssig), [], tol);
+          paths.push({ ...loop, closed: true });
+        } else {
+          const sm = smoothOpen(r.pts, ssig);
+          paths.push({ start: sm[0], segs: fitOpen(sm, tol) });
+        }
+        for (const k of r.idx) widths.push(2 * dt[k] - 0.5);
+        len += r.pts.length;
+      }
+      widths.sort((a, b) => a - b);
+      const width = Math.max(1, widths[Math.floor(widths.length / 2)] ?? ink.width);
+      const shape: Shape = { type: 'strokes', paths };
+      n++;
+      out.push({
+        id: `trazo-${n}`, name: `Trazo ${n}`, kind: 'stroke', shape, freeform: shape, fill: 'none',
+        stroke: { color: q.hex[ink.label], width }, opacity: 1, visible: true, holes: [], dx: 0, dy: 0,
+        parentId: null, depth: 0, area: len * width, reconstructed: false, symmetry: null, fitError: 0,
+      });
+    }
+    return out;
   }
 
   // Simetría global: figuras gemelas a ambos lados del eje se reflejan exactamente.
@@ -454,19 +620,19 @@ function mirrorTwins(layers: Layer[], axis: SymmetryAxis) {
   const center = (l: Layer): Vec => {
     const s = l.shape;
     if (s.type === 'circle' || s.type === 'ellipse' || s.type === 'rect') return [s.cx, s.cy];
-    const pts = s.type === 'polygon' ? s.points : [s.loop.start, ...s.loop.segs.map((g) => g.p)];
+    const pts = s.type === 'polygon' ? s.points : s.type === 'path' ? [s.loop.start, ...s.loop.segs.map((g) => g.p)] : s.paths.flatMap((p) => [p.start, ...p.segs.map((g) => g.p)]);
     return [pts.reduce((a, p) => a + p[0], 0) / pts.length, pts.reduce((a, p) => a + p[1], 0) / pts.length];
   };
   const side = (p: Vec) => (axis.angle === 90 ? p[0] - axis.p[0] : p[1] - axis.p[1]);
   const used = new Set<string>();
   for (const a of layers) {
-    if (a.kind === 'background' || used.has(a.id)) continue;
+    if (a.kind === 'background' || a.kind === 'stroke' || used.has(a.id)) continue;
     const ca = center(a);
     if (side(ca) >= -2) continue; // solo desde el lado negativo
     const target = reflectPoint(ca, axis);
     let best: Layer | null = null, bd = Infinity;
     for (const b of layers) {
-      if (b === a || b.fill !== a.fill || b.kind === 'background' || used.has(b.id)) continue;
+      if (b === a || b.fill !== a.fill || b.kind === 'background' || b.kind === 'stroke' || used.has(b.id)) continue;
       if (Math.abs(b.area - a.area) > Math.max(a.area, b.area) * 0.1) continue;
       const d = dist(center(b), target);
       if (d < bd) { bd = d; best = b; }
@@ -491,6 +657,7 @@ function scaleShape(s: Shape, k: number): Shape {
     case 'rect': return { ...s, cx: s.cx * k, cy: s.cy * k, w: s.w * k, h: s.h * k, rx: s.rx * k };
     case 'polygon': return { type: 'polygon', points: s.points.map(f) };
     case 'path': return { type: 'path', loop: mapLoop(s.loop, f) };
+    case 'strokes': return { type: 'strokes', paths: s.paths.map((p) => ({ ...mapLoop(p, f), closed: p.closed })) };
   }
 }
 
@@ -502,6 +669,7 @@ function scaleLayer(l: Layer, k: number): Layer {
     recognized: l.recognized && scaleShape(l.recognized, k),
     holes: l.holes.map((h) => scaleShape(h, k)),
     area: l.area * k * k,
+    stroke: l.stroke && { ...l.stroke, width: l.stroke.width * k },
     fitError: l.fitError * k,
     symmetry: l.symmetry && { ...l.symmetry, p: [l.symmetry.p[0] * k, l.symmetry.p[1] * k] },
   };

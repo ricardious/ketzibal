@@ -26,6 +26,8 @@ export interface VectorizeParams {
   reconstructHidden: boolean;
   /** Lado máximo de la imagen de trabajo. */
   maxSide: number;
+  /** Detectar el dibujo lineal (contornos oscuros) y convertirlo en trazos con grosor. */
+  lineArt: boolean;
 }
 
 export const DEFAULT_PARAMS: VectorizeParams = {
@@ -37,6 +39,7 @@ export const DEFAULT_PARAMS: VectorizeParams = {
   symmetry: true,
   reconstructHidden: true,
   maxSide: 1200,
+  lineArt: true,
 };
 
 /** Segmento cúbico: puntos de control 1 y 2 y punto final. El inicio es el final del anterior. */
@@ -53,12 +56,23 @@ export interface BezierLoop {
   segs: CubicSeg[];
 }
 
+/** Trazado abierto (o cerrado sin relleno) para dibujo lineal. */
+export interface BezierPath extends BezierLoop {
+  closed?: boolean;
+}
+
+export interface StrokeStyle {
+  color: string;
+  width: number;
+}
+
 export type Shape =
   | { type: 'circle'; cx: number; cy: number; r: number }
   | { type: 'ellipse'; cx: number; cy: number; rx: number; ry: number; rotation: number }
   | { type: 'rect'; cx: number; cy: number; w: number; h: number; rx: number; rotation: number }
   | { type: 'polygon'; points: Vec[] }
-  | { type: 'path'; loop: BezierLoop };
+  | { type: 'path'; loop: BezierLoop }
+  | { type: 'strokes'; paths: BezierPath[] };
 
 export type ShapeKind =
   | 'background'
@@ -70,7 +84,9 @@ export type ShapeKind =
   | 'regular-polygon'
   | 'star'
   | 'polygon'
-  | 'path';
+  | 'path'
+  | 'silhouette'
+  | 'stroke';
 
 export interface SymmetryAxis {
   /** Punto del eje. */
@@ -86,7 +102,10 @@ export interface Layer {
   id: string;
   name: string;
   kind: ShapeKind;
+  /** Color de relleno; 'none' en capas de trazo. */
   fill: string;
+  /** Contorno con grosor (dibujo lineal). */
+  stroke: StrokeStyle | null;
   opacity: number;
   visible: boolean;
   /** Geometría exterior. */

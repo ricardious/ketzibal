@@ -203,6 +203,10 @@ export function Canvas() {
                   d={dMap.get(l.id)}
                   fill={l.fill}
                   fillRule="evenodd"
+                  stroke={wire ? undefined : l.stroke?.color}
+                  strokeWidth={wire ? undefined : l.stroke?.width}
+                  strokeLinecap={l.stroke ? 'round' : undefined}
+                  strokeLinejoin={l.stroke ? 'round' : undefined}
                   opacity={l.opacity < 1 ? l.opacity : undefined}
                   transform={l.dx || l.dy ? `translate(${l.dx} ${l.dy})` : undefined}
                   vectorEffect={wire ? 'non-scaling-stroke' : undefined}
@@ -297,13 +301,16 @@ function Nodes({ shape, scale }: { shape: Shape; scale: number }) {
       break;
     }
     case 'polygon': anchors.push(...shape.points); break;
-    case 'path': {
-      let prev = shape.loop.start;
-      anchors.push(prev);
-      for (const g of shape.loop.segs) {
-        if (!g.line) handles.push([prev, g.c1], [g.p, g.c2]);
-        anchors.push(g.p);
-        prev = g.p;
+    case 'path':
+    case 'strokes': {
+      for (const loop of shape.type === 'path' ? [shape.loop] : shape.paths) {
+        let prev = loop.start;
+        anchors.push(prev);
+        for (const g of loop.segs) {
+          if (!g.line) handles.push([prev, g.c1], [g.p, g.c2]);
+          anchors.push(g.p);
+          prev = g.p;
+        }
       }
     }
   }

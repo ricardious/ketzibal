@@ -92,8 +92,10 @@ export function shapeBounds(s: Shape): [number, number, number, number] {
       const xs = s.points.map((q) => q[0]), ys = s.points.map((q) => q[1]);
       return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
     }
-    case 'path': {
-      const all = [s.loop.start, ...s.loop.segs.flatMap((g) => [g.c1, g.c2, g.p])];
+    case 'path':
+    case 'strokes': {
+      const loops = s.type === 'path' ? [s.loop] : s.paths;
+      const all = loops.flatMap((l) => [l.start, ...l.segs.flatMap((g) => [g.c1, g.c2, g.p])]);
       const xs = all.map((q) => q[0]), ys = all.map((q) => q[1]);
       return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
     }
@@ -313,7 +315,7 @@ function snapLine(l: { p: Vec; d: Vec }): { p: Vec; d: Vec } {
 }
 
 /** Clasifica un polígono y lo regulariza si es casi regular (o estrella). */
-function classifyPolygon(v: Vec[]): { kind: ShapeKind; shape: Shape; regularized: Vec[] | null } {
+function classifyPolygon(v: Vec[]): { kind: ShapeKind; shape: Shape; regularized: Vec[] | null; crisp?: boolean } {
   const n = v.length;
   const c: Vec = [v.reduce((s, p) => s + p[0], 0) / n, v.reduce((s, p) => s + p[1], 0) / n];
   const radii = v.map((p) => dist(p, c));
@@ -374,7 +376,7 @@ function classifyPolygon(v: Vec[]): { kind: ShapeKind; shape: Shape; regularized
       return { kind: 'star', shape: { type: 'polygon', points: reg }, regularized: reg };
     }
   }
-  return { kind: n === 3 ? 'triangle' : 'polygon', shape: { type: 'polygon', points: v }, regularized: null };
+  return { kind: n === 3 ? 'triangle' : 'polygon', shape: { type: 'polygon', points: v }, regularized: null, crisp: isCrispPolygon(v) };
 }
 
 /** Ajusta la fase a una orientación canónica (vértice arriba o lado plano arriba) si está cerca. */
@@ -478,9 +480,9 @@ function recognizeImpl(inp: FitInput): FitResult | null {
   if (poly) {
     const cls = classifyPolygon(poly);
     const vis = occluded ? visible : ones(n);
-    const r = accept(cls.kind, cls.shape, fitError(cls.shape, pts, vis));
+    const r = cls.crisp === false ? null : accept(cls.kind, cls.shape, fitError(cls.shape, pts, vis));
     if (r) return r;
-    if (cls.regularized) {
+    if (cls.regularized && isCrispPolygon(poly)) {
       const raw: Shape = { type: 'polygon', points: poly };
       const r2 = accept(poly.length === 3 ? 'triangle' : 'polygon', raw, fitError(raw, pts, vis));
       if (r2) return r2;
@@ -490,6 +492,22 @@ function recognizeImpl(inp: FitInput): FitResult | null {
 }
 
 function ones(n: number) { return new Uint8Array(n).fill(1); }
+
+/**
+ * Un polígono irregular solo es creíble con pocos vértices y esquinas marcadas;
+ * si no, es una curva aproximada por segmentos y debe quedar como trazado.
+ */
+export function isCrispPolygon(v: Vec[]): boolean {
+  const n = v.length;
+  if (n <= 4) return true;
+  if (n > 8) return false;
+  for (let i = 0; i < n; i++) {
+    const a = sub(v[i], v[(i - 1 + n) % n]), b = sub(v[(i + 1) % n], v[i]);
+    const turn = Math.acos(Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1]) / (Math.hypot(...a) * Math.hypot(...b))))) / DEG;
+    if (turn < 12) return false;
+  }
+  return true;
+}
 
 // utilidades 3x3
 function mul3(a: ArrayLike<number>, b: ArrayLike<number>): number[] {

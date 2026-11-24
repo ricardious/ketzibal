@@ -59,6 +59,7 @@ function Params() {
         <h3 className="section__title" id="s-geo">Corrección geométrica</h3>
         <Toggle label="Reconocer formas" description="Círculos, elipses, rectángulos, polígonos regulares y estrellas." checked={p.detectShapes} disabled={disabled} onChange={(v) => setParam('detectShapes', v)} />
         <Toggle label="Simetría" description="Detecta ejes por figura y de la composición, y los aplica." checked={p.symmetry} disabled={disabled} onChange={(v) => setParam('symmetry', v)} />
+        <Toggle label="Detectar contornos" description="Las líneas oscuras se convierten en trazos con grosor y la figura en una silueta única." checked={p.lineArt} disabled={disabled} onChange={(v) => setParam('lineArt', v)} />
         <Toggle label="Reconstruir ocultas" description="Completa figuras tapadas por otras capas." checked={p.reconstructHidden} disabled={disabled || !p.detectShapes} onChange={(v) => setParam('reconstructHidden', v)} />
         <Slider label="Suavizado" value={p.smoothing} min={0} max={100} disabled={disabled} format={(v) => `${v}%`} onChange={(v) => setParam('smoothing', v)} />
         <Slider label="Tolerancia" value={p.tolerance} min={0.25} max={4} step={0.25} disabled={disabled} format={(v) => `${v.toFixed(2)} px`} onChange={(v) => setParam('tolerance', v)} />
@@ -111,14 +112,15 @@ function LayerInspector() {
             onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== layer.name) updateLayer(layer.id, { name: v }); }}
             onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
         </div>
-        <div className="field">
+        {layer.kind !== 'stroke' && <div className="field">
           <label className="field__label" htmlFor="ly-fill">Relleno</label>
           <div className="color-field">
             <input id="ly-fill" type="color" value={layer.fill.toLowerCase()} onFocus={beginEdit}
               onChange={(e) => updateLayer(layer.id, { fill: e.target.value.toUpperCase() }, false)} />
             <HexInput layer={layer} onCommit={(fill) => updateLayer(layer.id, { fill })} />
           </div>
-        </div>
+        </div>}
+        {!isBg && <StrokeFields layer={layer} />}
         <Slider label="Opacidad" value={Math.round(layer.opacity * 100)} min={0} max={100} format={(v) => `${v}%`}
           onChange={(v) => updateLayer(layer.id, { opacity: v / 100 })} />
         <Toggle label="Visible" checked={layer.visible} onChange={(v) => updateLayer(layer.id, { visible: v })} />
@@ -141,7 +143,7 @@ function LayerInspector() {
               checked={usingRecognized}
               onChange={(v) => updateLayer(layer.id, { shape: v ? layer.recognized! : layer.freeform })} />
           )}
-          {layer.shape.type !== 'path' && (
+          {layer.shape.type !== 'path' && layer.shape.type !== 'strokes' && (
             <Button variant="outline" size="sm" icon={<Spline />} onClick={() => updateLayer(layer.id, { shape: layer.freeform })}>Convertir en trazado</Button>
           )}
           {!layer.recognized && layer.shape.type === 'path' && (
@@ -171,6 +173,42 @@ function LayerInspector() {
       </section>
     </>
   );
+}
+
+function StrokeFields({ layer }: { layer: Layer }) {
+  const { updateLayer, beginEdit } = useStore.getState();
+  const palette = useStore((s) => s.palette);
+  const st = layer.stroke;
+  const darkest = palette.length ? palette.reduce((a, b) => (lum(a) < lum(b) ? a : b)) : '#000000';
+  return (
+    <>
+      {layer.kind !== 'stroke' && (
+        <Toggle label="Contorno" description={st ? 'La capa se dibuja con un trazo en su borde.' : 'Sin trazo en el borde.'} checked={!!st}
+          onChange={(v) => updateLayer(layer.id, { stroke: v ? { color: darkest, width: 4 } : null })} />
+      )}
+      {st && (
+        <>
+          <div className="field">
+            <label className="field__label" htmlFor="ly-stroke">Color del trazo</label>
+            <div className="color-field">
+              <input id="ly-stroke" type="color" value={st.color.toLowerCase()} onFocus={beginEdit}
+                onChange={(e) => updateLayer(layer.id, { stroke: { ...st, color: e.target.value.toUpperCase() } }, false)} />
+              <input key={layer.id + st.color} className="input input--mono" defaultValue={st.color} aria-label="Color del trazo en hexadecimal" spellCheck={false}
+                onBlur={(e) => { const v = e.target.value.trim().toUpperCase(); if (/^#?[0-9A-F]{6}$/.test(v)) updateLayer(layer.id, { stroke: { ...st, color: v.startsWith('#') ? v : `#${v}` } }); else e.target.value = st.color; }}
+                onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }} />
+            </div>
+          </div>
+          <Slider label="Grosor del trazo" value={Math.round(st.width * 2) / 2} min={0.5} max={Math.max(40, Math.ceil(st.width * 2))} step={0.5}
+            format={(v) => `${v.toFixed(1)} px`} onChange={(v) => updateLayer(layer.id, { stroke: { ...st, width: v } })} />
+        </>
+      )}
+    </>
+  );
+}
+
+function lum(hex: string) {
+  const n = parseInt(hex.slice(1), 16);
+  return 0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255);
 }
 
 function axisName(angle: number) {
