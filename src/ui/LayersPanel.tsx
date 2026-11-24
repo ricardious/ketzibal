@@ -104,16 +104,16 @@ export function LayersPanel() {
                         }}
                       />
                     ) : (
-                      l.name
+                      <>
+                        <span className="layer-name">{l.name}</span>
+                        {l.reconstructed && <span className="badge" title="Completada bajo otras capas">Reconstruida</span>}
+                        {l.symmetry && (l.symmetry.global || ['path', 'polygon', 'triangle'].includes(l.kind)) && <span className="badge badge--tertiary" title={l.symmetry.global ? 'Simetría global' : 'Simetría propia'}>Simetría</span>}
+                      </>
                     )
                   }
                   secondary={
                     <>
-                      {KIND_NAMES[l.kind]} · {nodeCount(l.shape)} nodos
-                      <span className="badges">
-                        {l.reconstructed && <span className="badge">Reconstruida</span>}
-                        {l.symmetry && <span className="badge badge--tertiary">Simetría</span>}
-                      </span>
+                      {KIND_NAMES[l.kind]} · <span className="t-mono-sm">{nodeCount(l.shape) + l.holes.reduce((a, h) => a + nodeCount(h), 0)}</span> nodos
                     </>
                   }
                   trailing={
