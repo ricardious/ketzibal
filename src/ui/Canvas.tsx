@@ -1,9 +1,12 @@
-import { Columns2, Image as ImageIcon, ImageUp, Layers2, Maximize, Minus, Plus, Scan, Shapes, Sparkles, SplitSquareHorizontal, Spline } from 'lucide-react';
+import { Focus, Columns2, Image as ImageIcon, ImageUp, Layers2, Maximize, Minus, Plus, Scan, Shapes, Sparkles, SplitSquareHorizontal, Spline } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { shapeArea } from '../engine/shapes';
 import { shapeToD, type Layer, type Shape, type SymmetryAxis, type Vec } from '../engine';
+import { DrawingTools } from './DrawingTools';
 import { Button, IconButton } from './components/Button';
 import { Slider } from './components/Slider';
 import { Tabs } from './components/Tabs';
+import { moveNode, type CurveNode } from './lib/edit-node';
 import { ACCEPTED } from './lib/image';
 import { sampleFile } from './lib/sample';
 import { useStore, type ViewMode } from './store';
@@ -24,8 +27,9 @@ export function Canvas() {
   const layers = useStore((s) => s.layers);
   const status = useStore((s) => s.status);
   const progress = useStore((s) => s.progress);
+  const contours = useStore((s) => s.contours);
   const error = useStore((s) => s.error);
-  const view = useStore((s) => s.view);
+  const normalView = useStore((s) => s.view);
   const split = useStore((s) => s.split);
   const overlayOpacity = useStore((s) => s.overlayOpacity);
   const showOutlines = useStore((s) => s.showOutlines);
@@ -34,8 +38,10 @@ export function Canvas() {
   const pan = useStore((s) => s.pan);
   const selectedId = useStore((s) => s.selectedId);
   const isolatedId = useStore((s) => s.isolatedId);
+  const view = isolatedId ? 'vector' : normalView;
+  const additionalIds = useStore(s => s.additionalIds);
   const globalAxis = useStore((s) => s.globalAxis);
-  const { set, select, updateLayer, beginEdit, loadFile } = useStore.getState();
+  const { set, select, isolate, updateLayer, beginEdit, loadFile } = useStore.getState();
 
   const box = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -98,15 +104,16 @@ export function Canvas() {
     if (!source) return;
     const target = (e.target as Element).closest('[data-id]') as SVGElement | null;
     const id = target?.getAttribute('data-id');
-    const canPick = view !== 'original' && e.button === 0 && !e.shiftKey;
+    const canPick = view !== 'original' && e.button === 0;
     if (id && canPick) {
+      if (e.shiftKey || e.ctrlKey || e.metaKey) { select(id, true); return; }
       select(id);
       const l = useStore.getState().layers.find((x) => x.id === id);
       if (!l || l.kind === 'background') return startPan(e);
       const start = toImage(e.clientX, e.clientY);
       const d0: Vec = [l.dx, l.dy];
       let moved = false;
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      target!.setPointerCapture(e.pointerId);
       const move = (ev: PointerEvent) => {
         const p = toImage(ev.clientX, ev.clientY);
         const dx = p[0] - start[0], dy = p[1] - start[1];
@@ -132,6 +139,35 @@ export function Canvas() {
     window.addEventListener('pointerup', up);
   };
 
+  const dragNode = (e: React.PointerEvent<SVGElement>, node: CurveNode) => {
+    if (!selected || !isolatedId || e.button !== 0) return;
+    e.stopPropagation();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const start = toImage(e.clientX, e.clientY);
+    let moved = false;
+    const move = (ev: PointerEvent) => {
+      const now = toImage(ev.clientX, ev.clientY);
+      const delta: Vec = [now[0] - start[0], now[1] - start[1]];
+      if (!moved && Math.hypot(...delta) * s < 1) return;
+      if (!moved) { beginEdit(); moved = true; }
+      const shape = moveNode(selected.shape, node, delta);
+      const primitive = shape.type !== 'path' && shape.type !== 'strokes';
+      const kind = selected.kind === 'square' && shape.type === 'rect' && Math.abs(shape.w - shape.h) > 0.01 ? 'rect' : selected.kind;
+      updateLayer(selected.id, {
+        shape, kind,
+        ...(selected.kind === 'clipped-circle' ? {} : { freeform: shape }),
+        ...(primitive ? { recognized: undefined, area: shapeArea(shape), symmetry: null, reconstructed: false, fitError: 0 } : {}),
+      }, false);
+    };
+    const end = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('lostpointercapture', end);
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('lostpointercapture', end);
+  };
+
   const onSplitDown = (e: React.PointerEvent) => {
     e.stopPropagation();
     const move = (ev: PointerEvent) => {
@@ -152,7 +188,7 @@ export function Canvas() {
   const isFileDrag = (e: React.DragEvent) => e.dataTransfer.types.includes('Files');
 
   const showVector = view !== 'original';
-  const showImage = view !== 'vector';
+  const showImage = !!isolatedId || view !== 'vector';
   const vectorClip = view === 'split' ? `inset(0 0 0 ${split * 100}%)` : undefined;
   const wire = showOutlines;
 
@@ -186,20 +222,28 @@ export function Canvas() {
       {source && (
         <div className="stage" style={{ width: iw, height: ih, transform: `translate(${tx}px, ${ty}px) scale(${s})` }}>
           <div className="stage__frame" />
-          {showImage && <img src={source.url} alt="Imagen original" draggable={false} style={{ imageRendering: s > 2 ? 'pixelated' : 'auto' }} />}
+          {showImage && <img src={source.url} alt="Imagen original" draggable={false} style={{ opacity: isolatedId ? 0.4 : 1, imageRendering: s > 2 ? 'pixelated' : 'auto' }} />}
           {showVector && (
             <svg
               className={`vector ${wire ? 'wire' : ''}`}
               viewBox={`0 0 ${iw} ${ih}`}
               style={{ clipPath: vectorClip, opacity: view === 'overlay' ? overlayOpacity : 1 }}
+              onDoubleClick={e => {
+                const id = (e.target as Element).getAttribute('data-id');
+                if (id) isolate(isolatedId === id ? null : id);
+              }}
               onPointerOver={(e) => setHover((e.target as Element).getAttribute('data-id'))}
               onPointerOut={() => setHover(null)}
             >
-              {view !== 'split' && view !== 'overlay' && <rect width={iw} height={ih} fill="#fff" />}
+              {!showImage && <rect width={iw} height={ih} fill="#fff" />}
+              <defs>{!isolatedId && visibleLayers.filter(l => l.kind === 'clipped-circle').map(l => (
+                <clipPath id={`visible-${l.id}`} key={l.id}><path clipRule="evenodd" d={[l.freeform, ...l.holes].map(s => shapeToD(s)).join('')} /></clipPath>
+              ))}</defs>
               {visibleLayers.map((l) => (
                 <path
                   key={l.id}
                   data-id={l.id}
+                  clipPath={!isolatedId && l.kind === 'clipped-circle' ? `url(#visible-${l.id})` : undefined}
                   d={dMap.get(l.id)}
                   fill={l.fill}
                   fillRule="evenodd"
@@ -212,19 +256,21 @@ export function Canvas() {
                   vectorEffect={wire ? 'non-scaling-stroke' : undefined}
                 />
               ))}
+              {status === 'processing' && contours && <path className="sel-outline" d={contours} pointerEvents="none" />}
             </svg>
           )}
           <svg className="overlay-ui" viewBox={`0 0 ${iw} ${ih}`}>
-            {showAxes && globalAxis && <AxisLine axis={globalAxis} w={iw} h={ih} global />}
-            {hover && hover !== selectedId && showVector && (() => {
+            {!isolatedId && showAxes && globalAxis && <AxisLine axis={globalAxis} w={iw} h={ih} global />}
+            {!isolatedId && hover && hover !== selectedId && showVector && (() => {
               const l = layers.find((x) => x.id === hover);
               return l && l.kind !== 'background' ? <path className="hover-outline" d={dMap.get(l.id)} transform={`translate(${l.dx} ${l.dy})`} /> : null;
             })()}
+            {layers.filter(l => additionalIds.includes(l.id)).map(l => <path key={l.id} className="sel-outline" d={dMap.get(l.id)} transform={`translate(${l.dx} ${l.dy})`} />)}
             {selected && selected.kind !== 'background' && (
               <g transform={`translate(${selected.dx} ${selected.dy})`}>
                 <path className="sel-outline" d={dMap.get(selected.id)} />
                 {showAxes && selected.symmetry && !selected.symmetry.global && <AxisLine axis={selected.symmetry} w={iw} h={ih} />}
-                <Nodes shape={selected.shape} scale={s} />
+                <Nodes shape={selected.shape} scale={s} onDrag={isolatedId ? dragNode : undefined} />
               </g>
             )}
           </svg>
@@ -250,9 +296,11 @@ export function Canvas() {
       {error && <div className="error-banner" role="alert">{error}</div>}
       {dropOver && source && <div className="drop-veil" />}
 
+      {source && status === 'done' && <DrawingTools key={source.url + (selectedId ?? '') + (isolatedId ?? '')} selected={selected} scale={s} tx={tx} ty={ty} />}
+
       {source && (
         <div className="toolbar" role="toolbar" aria-label="Herramientas del lienzo" onPointerDown={(e) => e.stopPropagation()}>
-          <Tabs label="Modo de vista" items={MODES} value={view} onChange={(v) => set({ view: v })} iconOnly={size.w < 720} />
+          {isolatedId ? <Button size="sm" icon={<Focus />} onClick={() => isolate(null)}>Salir del aislamiento</Button> : <Tabs label="Modo de vista" items={MODES} value={view} onChange={(v) => set({ view: v })} iconOnly={size.w < 720} />}
           {view === 'overlay' && (
             <Slider label="Opacidad del vector" value={Math.round(overlayOpacity * 100)} min={0} max={100} onChange={(v) => set({ overlayOpacity: v / 100 })} format={(v) => `${v}%`} />
           )}
@@ -281,10 +329,15 @@ function AxisLine({ axis, w, h, global }: { axis: SymmetryAxis; w: number; h: nu
 }
 
 /** Nodos de la forma seleccionada (y manejadores de Bézier). */
-function Nodes({ shape, scale }: { shape: Shape; scale: number }) {
+function Nodes({ shape, scale, onDrag }: { shape: Shape; scale: number; onDrag?: (e: React.PointerEvent<SVGElement>, node: CurveNode) => void }) {
   const r = 3.5 / scale;
   const anchors: Vec[] = [];
   const handles: [Vec, Vec][] = [];
+  const anchorNodes: CurveNode[] = [], handleNodes: CurveNode[] = [];
+  const events = (node?: CurveNode) => onDrag && node ? {
+    style: { pointerEvents: 'all' as const, cursor: 'grab' },
+    onPointerDown: (e: React.PointerEvent<SVGElement>) => onDrag(e, node),
+  } : {};
   switch (shape.type) {
     case 'circle': anchors.push([shape.cx + shape.r, shape.cy], [shape.cx, shape.cy + shape.r], [shape.cx - shape.r, shape.cy], [shape.cx, shape.cy - shape.r]); break;
     case 'ellipse': {
@@ -300,25 +353,36 @@ function Nodes({ shape, scale }: { shape: Shape; scale: number }) {
       }
       break;
     }
-    case 'polygon': anchors.push(...shape.points); break;
+    case 'polygon':
+      anchors.push(...shape.points);
+      shape.points.forEach((_, segment) => anchorNodes.push({ loop: 0, segment, point: 'p' }));
+      break;
     case 'path':
     case 'strokes': {
-      for (const loop of shape.type === 'path' ? [shape.loop] : shape.paths) {
+      for (const [index, loop] of (shape.type === 'path' ? [shape.loop] : shape.paths).entries()) {
         let prev = loop.start;
         anchors.push(prev);
-        for (const g of loop.segs) {
-          if (!g.line) handles.push([prev, g.c1], [g.p, g.c2]);
+        anchorNodes.push({ loop: index, segment: -1, point: 'start' });
+        for (const [segment, g] of loop.segs.entries()) {
+          if (!g.line) {
+            handles.push([prev, g.c1], [g.p, g.c2]);
+            handleNodes.push({ loop: index, segment, point: 'c1' }, { loop: index, segment, point: 'c2' });
+          }
+          anchorNodes.push({ loop: index, segment, point: 'p' });
           anchors.push(g.p);
           prev = g.p;
         }
       }
     }
   }
+  if (shape.type === 'circle' || shape.type === 'ellipse' || shape.type === 'rect') {
+    anchors.forEach((_, segment) => anchorNodes.push({ loop: 0, segment, point: 'p' }));
+  }
   return (
     <g>
       {handles.map(([a, b], i) => <line key={`l${i}`} className="ctrl-line" x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} />)}
-      {handles.map(([, b], i) => <circle key={`h${i}`} className="node--ctrl" cx={b[0]} cy={b[1]} r={r * 0.6} />)}
-      {anchors.map((p, i) => <rect key={i} className="node" x={p[0] - r} y={p[1] - r} width={2 * r} height={2 * r} rx={r * 0.3} />)}
+      {handles.map(([, b], i) => <circle {...events(handleNodes[i])} key={`h${i}`} className="node--ctrl" cx={b[0]} cy={b[1]} r={r * 0.6} />)}
+      {anchors.map((p, i) => <rect {...events(anchorNodes[i])} key={i} className="node" x={p[0] - r} y={p[1] - r} width={2 * r} height={2 * r} rx={r * 0.3} />)}
     </g>
   );
 }
