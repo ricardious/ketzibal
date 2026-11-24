@@ -14,7 +14,7 @@ export function num(v: number, decimals = 2): string {
 
 function pt(p: Vec, d: number) { return `${num(p[0], d)} ${num(p[1], d)}`; }
 
-export function loopToD(loop: BezierLoop, d = 2): string {
+export function loopToD(loop: BezierLoop, d = 2, close = true): string {
   let s = `M${pt(loop.start, d)}`;
   let prev = loop.start;
   for (const g of loop.segs) {
@@ -23,7 +23,7 @@ export function loopToD(loop: BezierLoop, d = 2): string {
     prev = g.p;
   }
   void prev;
-  return s + 'Z';
+  return close ? s + 'Z' : s;
 }
 
 /** Trazado `d` equivalente a cualquier forma (para combinarla con huecos). */
@@ -48,6 +48,8 @@ export function shapeToD(s: Shape, d = 2): string {
       return 'M' + s.points.map((p) => pt(p, d)).join('L') + 'Z';
     case 'path':
       return loopToD(s.loop, d);
+    case 'strokes':
+      return s.paths.map((p) => loopToD(p, d, !!p.closed)).join('');
   }
 }
 
@@ -70,6 +72,8 @@ export function shapeElement(s: Shape, attrs: string, d = 2): string {
       return `<polygon points="${s.points.map((p) => `${num(p[0], d)},${num(p[1], d)}`).join(' ')}"${attrs}/>`;
     case 'path':
       return `<path d="${loopToD(s.loop, d)}"${attrs}/>`;
+    case 'strokes':
+      return `<path d="${shapeToD(s, d)}"${attrs}/>`;
   }
 }
 
@@ -77,7 +81,11 @@ export function layerElement(l: Layer, d = 2, withId = true): string {
   const id = withId ? ` id="${l.id}"` : '';
   const op = l.opacity < 1 ? ` opacity="${num(l.opacity, 2)}"` : '';
   const tf = l.dx || l.dy ? ` transform="translate(${num(l.dx, d)} ${num(l.dy, d)})"` : '';
-  const attrs = `${id} fill="${shortHex(l.fill)}"${op}${tf}`;
+  const fill = l.fill === 'none' ? 'none' : shortHex(l.fill);
+  const stroke = l.stroke
+    ? ` stroke="${shortHex(l.stroke.color)}" stroke-width="${num(l.stroke.width, 1)}" stroke-linecap="round" stroke-linejoin="round"`
+    : '';
+  const attrs = `${id} fill="${fill}"${stroke}${op}${tf}`;
   if (l.holes.length === 0) return shapeElement(l.shape, attrs, d);
   const dd = [l.shape, ...l.holes].map((s) => shapeToD(s, d)).join('');
   return `<path d="${dd}" fill-rule="evenodd"${attrs}/>`;
@@ -115,5 +123,6 @@ export function nodeCount(s: Shape): number {
     case 'rect': return s.rx > 0.05 ? 8 : 4;
     case 'polygon': return s.points.length;
     case 'path': return s.loop.segs.length;
+    case 'strokes': return s.paths.reduce((a, p) => a + p.segs.length + (p.closed ? 0 : 1), 0);
   }
 }

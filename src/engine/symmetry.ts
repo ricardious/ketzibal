@@ -192,6 +192,7 @@ export function mirrorShape(s: Shape, axis: SymmetryAxis): Shape {
     case 'rect': { const [cx, cy] = f([s.cx, s.cy]); return { ...s, cx, cy, rotation: normRot(rot(s.rotation), 90) }; }
     case 'polygon': return { type: 'polygon', points: s.points.map(f).reverse() };
     case 'path': return { type: 'path', loop: { start: f(s.loop.start), segs: s.loop.segs.map((g) => ({ c1: f(g.c1), c2: f(g.c2), p: f(g.p), line: g.line })) } };
+    case 'strokes': return { type: 'strokes', paths: s.paths.map((p) => ({ closed: p.closed, start: f(p.start), segs: p.segs.map((g) => ({ c1: f(g.c1), c2: f(g.c2), p: f(g.p), line: g.line })) })) };
   }
 }
 

@@ -83,7 +83,7 @@ export function LayersPanel() {
                   onClick={() => select(l.id)}
                   onDoubleClick={() => setRenaming(l.id)}
                   onKeyDown={(e) => onKey(e, l)}
-                  leading={<span className="swatch" style={{ background: l.fill }} />}
+                  leading={<span className="swatch" style={{ background: l.fill !== 'none' ? l.fill : 'transparent', boxShadow: l.stroke ? `inset 0 0 0 ${l.fill === 'none' ? 2 : 3}px ${l.stroke.color}` : undefined }} />}
                   primary={
                     renaming === l.id ? (
                       <input

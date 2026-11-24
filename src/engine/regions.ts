@@ -115,39 +115,51 @@ export function cleanupLabels(labels: Int32Array, lab: Float32Array, W: number, 
     }
     if (!any) return;
     // Crecimiento multi-fuente desde los píxeles conservados.
-    const N = W * H;
-    const dead = new Uint8Array(N);
-    for (let i = 0; i < N; i++) if (remove[cc.comp[i]]) dead[i] = 1;
-    let frontier: number[] = [];
-    for (let i = 0; i < N; i++) if (dead[i] && hasLiveNeighbor(dead, i, W, H)) frontier.push(i);
-    if (frontier.length === 0) return; // toda la imagen es ruido
-    while (frontier.length) {
-      const assigned: [number, number][] = [];
-      for (const i of frontier) {
-        if (!dead[i]) continue;
-        const own = labels[i] >= 0 ? labels[i] * 3 : -1;
-        let best = -2, bd = Infinity;
-        const x = i % W;
-        const cand = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i - W, i + W];
-        for (const n of cand) {
-          if (n < 0 || n >= N || dead[n]) continue;
-          const l = labels[n];
-          const d = own < 0 || l < 0 ? 1 : labDist(lab, own, lab, l * 3);
-          if (d < bd) { bd = d; best = l; }
-        }
-        if (best !== -2) assigned.push([i, best]);
-      }
-      const next: number[] = [];
-      for (const [i, l] of assigned) { labels[i] = l; dead[i] = 0; }
-      for (const [i] of assigned) {
-        const x = i % W;
-        for (const n of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i - W, i + W]) {
-          if (n >= 0 && n < N && dead[n]) next.push(n);
-        }
-      }
-      frontier = next;
-    }
+    const dead = new Uint8Array(W * H);
+    for (let i = 0; i < W * H; i++) if (remove[cc.comp[i]]) dead[i] = 1;
+    if (!growInto(labels, dead, W, H, lab, true)) return;
   }
+}
+
+/**
+ * Reasigna los píxeles marcados en `dead` creciendo desde sus vecinos vivos, una capa por paso
+ * (los frentes opuestos se encuentran en la línea media). Con `byColor`, cada píxel elige al
+ * vecino de color más parecido al suyo. Devuelve false si no había ningún píxel vivo.
+ */
+export function growInto(labels: Int32Array, dead: Uint8Array, W: number, H: number, lab: Float32Array, byColor: boolean): boolean {
+  const N = W * H;
+  let frontier: number[] = [];
+  for (let i = 0; i < N; i++) if (dead[i] && hasLiveNeighbor(dead, i, W, H)) frontier.push(i);
+  if (frontier.length === 0) return false;
+  while (frontier.length) {
+    const assigned: [number, number][] = [];
+    for (const i of frontier) {
+      if (!dead[i]) continue;
+      const own = byColor && labels[i] >= 0 ? labels[i] * 3 : -1;
+      let best = -2, bd = Infinity;
+      const x = i % W;
+      const cand = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i - W, i + W];
+      for (const n of cand) {
+        if (n < 0 || n >= N || dead[n]) continue;
+        const l = labels[n];
+        const d = own < 0 || l < 0 ? 1 : labDist(lab, own, lab, l * 3);
+        if (d < bd) { bd = d; best = l; }
+      }
+      if (best !== -2) assigned.push([i, best]);
+    }
+    const next: number[] = [];
+    for (const [i, l] of assigned) { labels[i] = l; dead[i] = 0; }
+    for (const [i] of assigned) {
+      const x = i % W;
+      for (const n of [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i - W, i + W]) {
+        // dead = 2 marca "ya en cola" para no duplicar
+        if (n >= 0 && n < N && dead[n] === 1) { dead[n] = 2; next.push(n); }
+      }
+    }
+    for (const n of next) dead[n] = 1;
+    frontier = next;
+  }
+  return true;
 }
 
 function hasLiveNeighbor(dead: Uint8Array, i: number, W: number, H: number) {
