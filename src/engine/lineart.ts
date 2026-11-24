@@ -101,7 +101,7 @@ export function detectInk(cc: Components, st: RegionStats, lab: Float32Array, W:
   const mask = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) if (stroke[cc.comp[i]]) mask[i] = 1;
   // núcleos gruesos pegados a la tinta (zonas rellenas del color del trazo) no son trazo
-  const d2 = distanceTransform(mask, W, H);
+  const d2 = distanceTransform(mask, W, H, cc.comp);
   const coreT = width * 0.75 + 1.5;
   const blob = new Uint8Array(W * H);
   let queue: number[] = [];
