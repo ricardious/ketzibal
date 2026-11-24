@@ -86,6 +86,11 @@ export function layerElement(l: Layer, d = 2, withId = true): string {
     ? ` stroke="${shortHex(l.stroke.color)}" stroke-width="${num(l.stroke.width, 1)}" stroke-linecap="round" stroke-linejoin="round"`
     : '';
   const attrs = `${id} fill="${fill}"${stroke}${op}${tf}`;
+  if (l.kind === 'clipped-circle') {
+    const clip = `visible-${l.id}`;
+    const mask = [l.freeform, ...l.holes].map(s => shapeToD(s, d)).join('');
+    return `<defs><clipPath id="${clip}"><path d="${mask}" clip-rule="evenodd"/></clipPath></defs><g${tf}>${shapeElement(l.shape, `${id} fill="${fill}"${stroke}${op} clip-path="url(#${clip})"`, d)}</g>`;
+  }
   if (l.holes.length === 0) return shapeElement(l.shape, attrs, d);
   const dd = [l.shape, ...l.holes].map((s) => shapeToD(s, d)).join('');
   return `<path d="${dd}" fill-rule="evenodd"${attrs}/>`;

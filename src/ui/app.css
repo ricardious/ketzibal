@@ -233,3 +233,10 @@
   .toolbar .hide-mobile { display: none; }
   .dropzone { inset: var(--page-margin); }
 }
+
+.drawing-surface { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 3; cursor: crosshair; touch-action: none; }
+.drawing-tools { position: absolute; top: var(--gutter-sm); left: var(--gutter-sm); z-index: 4; max-width: calc(100% - 2 * var(--gutter-sm)); }
+.drawing-tools__row, .drawing-tools__hint { background: var(--surface-container); border: 1px solid var(--outline-variant); border-radius: var(--rounded-lg); }
+.drawing-tools__row { display: inline-flex; max-width: 100%; flex-wrap: wrap; align-items: center; gap: var(--gutter-xs); padding: var(--gutter-xs); }
+.drawing-tools__row select { width: auto; }
+.drawing-tools__hint { margin-top: 4px; padding: 6px 10px; font-size: 12px; pointer-events: none; }

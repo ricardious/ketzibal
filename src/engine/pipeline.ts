@@ -2,11 +2,13 @@ import { traceContours, type Contour } from './contour';
 import { detectCorners, fitClosed, fitOpen, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
 import { quantize } from './quantize';
 import { cleanupLabels, components, growInto, majoritySmooth, maskHoles, regionMask, regionStats, type Components, type LocalMask, type RegionStats } from './regions';
-import { chainRuns, detectInk, skeletonPaths, thin, type Ink } from './lineart';
+import { centerStroke, chainRuns, detectBrownInk, detectInk, distanceTransform, skeletonPaths, thin, type Ink } from './lineart';
+import { fitClippedCircle } from './arcs';
 import { recognize } from './shapes';
 import { detectGlobalSymmetry, detectSymmetry, mirrorLoop, mirrorShape, reflectPoint, symmetrizeHalf } from './symmetry';
 import type { BezierLoop, BezierPath, Layer, Progress, RasterImage, Shape, ShapeKind, SymmetryAxis, Vec, VectorizeParams, VectorizeResult } from './types';
 import { convexHull, dist, inPolygon, segDist } from './vec';
+import { shapeToD } from './svg';
 import { KIND_NAMES } from './names';
 
 type OnProgress = (p: Progress) => void;
@@ -60,10 +62,24 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   // Dibujo lineal: la tinta se retira del mapa de etiquetas y los rellenos crecen hasta su línea media.
   let ink: Ink | null = null;
   if (params.lineArt) {
-    const cc0 = components(q.labels, W, H);
-    ink = detectInk(cc0, regionStats(cc0, W, H), q.lab, W, H);
+    ink = detectBrownInk(img, q.labels, q.hex.length);
+    const rgbMask = ink?.mask;
+    if (!ink) {
+      const cc0 = components(q.labels, W, H);
+      ink = detectInk(cc0, regionStats(cc0, W, H), label => q.lab[label * 3] < 0.45, W, H);
+    }
     if (ink) {
-      growInto(q.labels, ink.mask.slice(), W, H, q.lab, false);
+      const replace = ink.mask.slice();
+      // El JPEG deja una franja del color cuantizado de la tinta alrededor
+      // del umbral RGB. Repartirla entre los rellenos evita capas residuales.
+      if (rgbMask) {
+        for (let i = 0; i < replace.length; i++) {
+          if (q.labels[i] !== ink.label || replace[i]) continue;
+          const x = i % W;
+          if ((x > 0 && rgbMask[i - 1]) || (x + 1 < W && rgbMask[i + 1]) || rgbMask[i - W] || rgbMask[i + W]) replace[i] = 1;
+        }
+      }
+      growInto(q.labels, replace, W, H, q.lab, false);
       majoritySmooth(q.labels, ink.mask, W, H, q.hex.length, Math.max(2, Math.round(ink.width * 0.6)), 3);
       cleanupLabels(q.labels, q.lab, W, H, Math.max(2, params.minArea));
     }
@@ -261,9 +277,17 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     tol = Math.max(tol, ink.width * 0.1);
   }
 
-  for (let oi = 0; oi < order.length; oi++) {
-    const c = order[oi];
-    if (oi % 8 === 0) onProgress({ stage: 'Reconstruyendo figuras', value: 0.55 + 0.43 * (oi / order.length) });
+  // La detección recorre las piezas de arriba abajo. El rango original sigue
+  // determinando las oclusiones y el orden de pintura en el SVG.
+  const scan = ink ? [...order].sort((a, b) => {
+    if (a >= cc.count || b >= cc.count) return Number(a >= cc.count) - Number(b >= cc.count);
+    return st.y0[a] - st.y0[b] || st.x0[a] - st.x0[b];
+  }) : order;
+  const byRegion = new Map<number, Layer>();
+  let preview = '';
+  let lastPreview = -Infinity;
+  for (let oi = 0; oi < scan.length; oi++) {
+    const c = scan[oi];
     const fill = q.hex[labelOf(c)];
     let layer: Omit<Layer, 'id' | 'name'>;
     if (c === bg) {
@@ -275,7 +299,19 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       layer = res;
     }
     const n = (counters[layer.kind] = (counters[layer.kind] ?? 0) + 1);
-    layers.push({ ...layer, id: idOf(c), name: layer.kind === 'background' ? 'Fondo' : `${KIND_NAMES[layer.kind]} ${n}` });
+    byRegion.set(c, { ...layer, id: idOf(c), name: layer.kind === 'background' ? 'Fondo' : `${KIND_NAMES[layer.kind]} ${n}` });
+    if (ink && c !== bg && c < cc.count) {
+      preview += [layer.shape, ...layer.holes].map(shape => shapeToD(scaleShape(shape, 1 / scale))).join('');
+    }
+    if (performance.now() - lastPreview >= 32 || oi === scan.length - 1) {
+      onProgress({ stage: 'Reconstruyendo figuras', value: 0.55 + 0.41 * (oi + 1) / scan.length, contours: preview });
+      lastPreview = performance.now();
+      preview = '';
+    }
+  }
+  for (const c of order) {
+    const layer = byRegion.get(c);
+    if (layer) layers.push(layer);
   }
 
   function base(kind: ShapeKind, shape: Shape, freeform: Shape, fill: string, parent: number, depth: number, area: number): Omit<Layer, 'id' | 'name'> {
@@ -300,11 +336,12 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       if (!v) occludedN++;
     }
     const occluded = occludedN > 0;
+    const touchesNetwork = !!ink && outer.outside.some(p => p >= 0 && ink.branched[p] >= 0);
     // ¿el borde es tinta? → la capa lleva contorno con grosor
     let stroke: Layer['stroke'] = null;
     if (ink) {
       let k = 0;
-      for (let i = 0; i < outer.pts.length; i++) { const o = outer.outside[i]; if (o >= 0 && ink.mask[o]) k++; }
+      for (let i = 0; i < outer.pts.length; i++) { const o = outer.outside[i]; if (o >= 0 && ink.mask[o] && ink.branched[o] < 0) k++; }
       if (k >= outer.pts.length * 0.8) stroke = { color: q.hex[ink.label], width: ink.width };
       if (stroke) strokedRecords.push({ c, pts: outer.pts, outside: outer.outside, rank: myRank, width: ink.width });
     }
@@ -313,7 +350,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
 
     // eje de simetría propio (o global si coincide)
     let axis: SymmetryAxis | null = null;
-    if (params.symmetry && !occluded) {
+    if (params.symmetry && !occluded && !touchesNetwork) {
       axis = detectSymmetry(m);
       if (axis && globalAxis && Math.abs(axis.angle - globalAxis.angle) < 2) {
         const off = Math.abs(globalAxis.angle === 90 ? axis.p[0] - globalAxis.p[0] : axis.p[1] - globalAxis.p[1]);
@@ -355,7 +392,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     if (params.detectShapes) {
       const rec = recognize({
         pts: basePts, visible: axis ? new Uint8Array(basePts.length).fill(1) : visible,
-        area: outer.area, tol, allowCompletion: params.reconstructHidden, coverOk,
+        area: outer.area, tol, allowCompletion: params.reconstructHidden && !touchesNetwork, coverOk,
       });
       if (rec) {
         kind = rec.kind;
@@ -363,6 +400,15 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
         reconstructed = rec.reconstructed;
         fitError = rec.error;
         if (axis) shape = recognized = snapToAxis(rec.shape, axis);
+      }
+    }
+
+    if (!recognized && params.detectShapes && params.reconstructHidden && touchesNetwork && !stroke && c < cc.count) {
+      const lens = fitClippedCircle(m, tol);
+      if (lens) {
+        kind = 'clipped-circle';
+        shape = recognized = { type: 'path', loop: lens };
+        reconstructed = true;
       }
     }
 
@@ -491,65 +537,116 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
         }
       }
     }
-    const skel = thin(ink.mask, W, H);
+    const simple = ink.mask.map((pixel, i) => ink.branched[i] < 0 ? pixel : 0);
+    const skel = thin(simple, W, H);
     const minLen = Math.max(3, ink.width * 0.8);
-    const runs: { pts: Vec[]; idx: number[] }[] = [];
+    const byOwner = new Map<number, Vec[][]>();
+    const owners = new Int32Array(cc.count).fill(-1);
+    for (let c = 0; c < cc.count; c++) {
+      const owner = absorbed[c] ? liveParent(c) : c;
+      if (owner !== bg && byRegion.has(owner)) owners[c] = owner;
+    }
     for (const path of skeletonPaths(skel, W, H, ink.width * 1.5)) {
       let cur: Vec[] = [];
-      const flush = () => { if (cur.length >= minLen) runs.push({ pts: cur, idx: cur.map((p) => Math.floor(p[1]) * W + Math.floor(p[0])) }); cur = []; };
+      const flush = () => {
+        if (cur.length >= minLen) {
+          // Votar a ambos lados del esqueleto evita que el antialiasing
+          // decida de qué pieza es una rama entera en un cruce.
+          const votes = new Map<number, number>();
+          const offset = Math.max(1, Math.ceil(ink.width * 0.65));
+          for (const [x, y] of cur) {
+            for (const [dx, dy] of [[-offset, 0], [offset, 0], [0, -offset], [0, offset]]) {
+              const px = Math.floor(x) + dx, py = Math.floor(y) + dy;
+              if (px < 0 || py < 0 || px >= W || py >= H) continue;
+              const owner = owners[cc.comp[py * W + px]];
+              if (owner >= 0) votes.set(owner, (votes.get(owner) ?? 0) + 1);
+            }
+          }
+          const owner = [...votes].sort((a, b) => b[1] - a[1])[0]?.[0] ?? -1;
+          if (!byOwner.has(owner)) byOwner.set(owner, []);
+          byOwner.get(owner)!.push(cur);
+        }
+        cur = [];
+      };
       for (const p of path) {
         if (covered[Math.floor(p[1]) * W + Math.floor(p[0])]) flush();
         else cur.push(p);
       }
       flush();
     }
-    const chains = chainRuns(runs.map((r) => r.pts), ink.width);
-    // agrupar en una capa las líneas que se tocan
-    const parent = chains.map((_, i) => i);
-    const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
-    const touch = ink.width * 1.2;
-    for (let a = 0; a < chains.length; a++) for (let b = 0; b < chains.length; b++) {
-      if (a === b || find(a) === find(b)) continue;
-      const A = chains[a];
-      if ([A[0], A[A.length - 1]].some((p) => chains[b].some((q) => (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 <= touch * touch))) parent[find(a)] = find(b);
-    }
-    const groups = new Map<number, number[]>();
-    chains.forEach((_, i) => { const g = find(i); if (!groups.has(g)) groups.set(g, []); groups.get(g)!.push(i); });
     const out: Layer[] = [];
     let n = 0;
     const ssig = Math.max(1, sigma, ink.width * 0.6);
-    for (const idxs of groups.values()) {
-      const paths: BezierPath[] = [];
-      let len = 0;
-      for (const i of idxs) {
-        const r = { pts: dedupe(chains[i]) };
-        if (r.pts.length < 2) continue;
-        const closed = r.pts.length > 8 && Math.abs(r.pts[0][0] - r.pts[r.pts.length - 1][0]) <= 1.5 && Math.abs(r.pts[0][1] - r.pts[r.pts.length - 1][1]) <= 1.5;
-        if (closed) {
-          const ring = r.pts.slice(0, -1);
-          const loop = fitClosed(smoothClosed(ring, ssig), [], tol);
-          paths.push({ ...loop, closed: true });
-        } else {
-          const sm = smoothOpen(r.pts, ssig);
-          paths.push({ start: sm[0], segs: fitOpen(sm, tol) });
+    for (const [owner, runs] of byOwner) {
+      const chains = chainRuns(runs, ink.width);
+      const piece = byRegion.get(owner);
+      // La silueta abarca el personaje entero. Solo una región de color
+      // concreta permite reunir ramas desconectadas en el mismo contorno.
+      const groups = piece && owner < cc.count ? [chains] : chains.map(chain => [chain]);
+      for (const group of groups) {
+        const paths: BezierPath[] = [];
+        let length = 0;
+        for (const chain of group) {
+          const pts = dedupe(chain);
+          if (pts.length < 2) continue;
+          length += pts.length;
+          const last = pts[pts.length - 1];
+          const closed = pts.length > 8 && Math.abs(pts[0][0] - last[0]) <= 1.5 && Math.abs(pts[0][1] - last[1]) <= 1.5;
+          if (closed) {
+            const loop = fitClosed(smoothClosed(pts.slice(0, -1), ssig), [], tol);
+            paths.push({ ...loop, closed: true });
+          } else {
+            const sm = smoothOpen(pts, ssig);
+            paths.push({ start: sm[0], segs: fitOpen(sm, tol) });
+          }
         }
-        len += r.pts.length;
+        if (!paths.length) continue;
+        const shape: Shape = { type: 'strokes', paths };
+        n++;
+        out.push({
+          id: `trazo-${n}`, name: piece && owner < cc.count ? `Contorno de ${piece.name}` : `Trazo ${n}`,
+          kind: 'stroke', shape, freeform: shape, fill: 'none',
+          stroke: { color: q.hex[ink.label], width: ink.width }, opacity: 1, visible: true, holes: [], dx: 0, dy: 0,
+          parentId: piece?.id ?? null, depth: (piece?.depth ?? -1) + 1, area: length * ink.width,
+          reconstructed: false, symmetry: null, fitError: 0,
+        });
       }
-      // todo el dibujo comparte un único grosor de línea
-      const width = ink.width;
-      const shape: Shape = { type: 'strokes', paths };
-      n++;
-      out.push({
-        id: `trazo-${n}`, name: `Trazo ${n}`, kind: 'stroke', shape, freeform: shape, fill: 'none',
-        stroke: { color: q.hex[ink.label], width }, opacity: 1, visible: true, holes: [], dx: 0, dy: 0,
-        parentId: null, depth: 0, area: len * width, reconstructed: false, symmetry: null, fitError: 0,
-      });
     }
     return out;
   }
 
   // Simetría global: figuras gemelas a ambos lados del eje se reflejan exactamente.
   if (globalAxis) mirrorTwins(layers, globalAxis);
+
+  if (ink && ink.branched.some(label => label >= 0)) {
+    const mask = Uint8Array.from(ink.branched, label => Number(label >= 0));
+    const radius = distanceTransform(mask, W, H);
+    const skeleton = thin(mask, W, H);
+    let n = 0;
+    for (const points of skeletonPaths(skeleton, W, H, Math.max(2, ink.width * 0.45))) {
+      // En una unión el radio inscrito incluye las ramas vecinas. La mediana
+      // a lo largo del tramo estima el grosor sin engordar todo el trazo.
+      const radii = points.map(([x, y]) => radius[Math.floor(y) * W + Math.floor(x)]).sort((a, b) => a - b);
+      const width = Math.max(1, 2 * radii[Math.floor(radii.length / 2)] - 0.7);
+      const first = points[0], last = points[points.length - 1];
+      const closed = first[0] === last[0] && first[1] === last[1];
+      const smooth = Math.min(sigma, width * 0.22);
+      const error = Math.min(tol, Math.max(0.4, width * 0.09));
+      const centered = centerStroke(points, mask, W, width);
+      let path: BezierPath;
+      if (closed) {
+        const ring = smoothClosed(centered.slice(0, -1), smooth);
+        path = { ...fitClosed(ring, [], error), closed: true };
+      } else {
+        const run = smoothOpen(centered, smooth);
+        path = { start: run[0], segs: fitOpen(run, error) };
+      }
+      const shape: Shape = { type: 'strokes', paths: [path] };
+      const layer = base('stroke', shape, shape, 'none', -1, 0, points.length * width);
+      n++;
+      layers.push({ ...layer, stroke: { width, color: q.hex[ink.label] }, name: `Contorno ${n}`, id: `tinta-${n}` });
+    }
+  }
 
   // Escalar a coordenadas de la imagen original
   const inv = 1 / scale;
@@ -682,11 +779,12 @@ function scaleShape(s: Shape, k: number): Shape {
 }
 
 function scaleLayer(l: Layer, k: number): Layer {
+  const shape = scaleShape(l.shape, k);
   return {
     ...l,
-    shape: scaleShape(l.shape, k),
-    freeform: scaleShape(l.freeform, k),
-    recognized: l.recognized && scaleShape(l.recognized, k),
+    shape,
+    freeform: l.freeform === l.shape ? shape : scaleShape(l.freeform, k),
+    recognized: l.recognized === l.shape ? shape : l.recognized && scaleShape(l.recognized, k),
     holes: l.holes.map((h) => scaleShape(h, k)),
     area: l.area * k * k,
     stroke: l.stroke && { ...l.stroke, width: l.stroke.width * k },

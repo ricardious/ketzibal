@@ -81,12 +81,15 @@ export function shapeBounds(s: Shape): [number, number, number, number] {
   switch (s.type) {
     case 'circle': return [s.cx - s.r, s.cy - s.r, s.cx + s.r, s.cy + s.r];
     case 'ellipse': {
-      const m = Math.max(s.rx, s.ry);
-      return [s.cx - m, s.cy - m, s.cx + m, s.cy + m];
+      const a = s.rotation * DEG;
+      const x = Math.hypot(s.rx * Math.cos(a), s.ry * Math.sin(a));
+      const y = Math.hypot(s.rx * Math.sin(a), s.ry * Math.cos(a));
+      return [s.cx - x, s.cy - y, s.cx + x, s.cy + y];
     }
     case 'rect': {
-      const m = Math.hypot(s.w, s.h) / 2;
-      return [s.cx - m, s.cy - m, s.cx + m, s.cy + m];
+      const a = s.rotation * DEG, c = Math.abs(Math.cos(a)), n = Math.abs(Math.sin(a));
+      const x = (c * s.w + n * s.h) / 2, y = (n * s.w + c * s.h) / 2;
+      return [s.cx - x, s.cy - y, s.cx + x, s.cy + y];
     }
     case 'polygon': {
       const xs = s.points.map((q) => q[0]), ys = s.points.map((q) => q[1]);
