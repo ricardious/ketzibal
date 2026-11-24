@@ -54,7 +54,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   onProgress({ stage: 'Cuantizando paleta', value: 0.1 });
   const q = quantize(img, params.colors);
   onProgress({ stage: 'Limpiando regiones', value: 0.3 });
-  cleanupLabels(q.labels, q.lab, W, H, Math.max(2, params.minArea));
+  cleanupLabels(q.labels, q.lab, W, H, Math.max(2, params.minArea), img.data);
   const cc = components(q.labels, W, H);
   const st = regionStats(cc, W, H);
 
@@ -96,16 +96,25 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     nodes[c].parent = best >= 0 ? best : bg;
   }
   // Huecos reales: el contenido tiene el color de lo que hay debajo de la figura.
+  // Se evalúa de afuera hacia adentro para no encadenar absorciones.
   const absorbed = new Uint8Array(cc.count);
-  for (let c = 0; c < cc.count; c++) {
-    const P = nodes[c].parent;
+  const liveParent = (c: number) => {
+    let p = nodes[c].parent;
+    while (p >= 0 && absorbed[p]) p = nodes[p].parent;
+    return p;
+  };
+  const depthOf = (c: number) => { let d = 0; for (let p = nodes[c].parent; p >= 0; p = nodes[p].parent) d++; return d; };
+  const byDepth = [...Array(cc.count).keys()].map((c) => [c, depthOf(c)]).sort((x, y) => x[1] - y[1]).map((x) => x[0]);
+  for (const c of byDepth) {
+    if (absorbed[c] || cc.label[c] < 0) continue;
+    const P = liveParent(c);
     const under = P >= 0 ? cc.label[P] : -1;
     for (const [h, mm] of holeContents[c]) {
       let tot = 0, same = 0;
       const direct: number[] = [];
       for (const [o, a] of mm) {
         tot += a;
-        if (nodes[o].parent === c) direct.push(o);
+        if (liveParent(o) === c) direct.push(o);
         if (cc.label[o] === under) same += a;
       }
       if (same > tot * 0.5) {
@@ -115,11 +124,6 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     }
   }
   // Re-asignar hijos de regiones absorbidas a la figura del hueco.
-  const liveParent = (c: number) => {
-    let p = nodes[c].parent;
-    while (p >= 0 && absorbed[p]) p = nodes[p].parent;
-    return p;
-  };
   for (let c = 0; c < cc.count; c++) nodes[c].parent = liveParent(c);
   const isLayer = (c: number) => !absorbed[c] && cc.label[c] >= 0;
   for (let c = 0; c < cc.count; c++) if (isLayer(c) && c !== bg && nodes[c].parent >= 0) nodes[nodes[c].parent].children.push(c);

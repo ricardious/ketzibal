@@ -4,7 +4,7 @@ const SIZE = 360;
 
 /**
  * Precisión visual: porcentaje de píxeles cuyo color vectorizado coincide con el original
- * (diferencia RGB media < 12%). Se calcula rasterizando el SVG en un lienzo reducido.
+ * (diferencia RGB media < 8%). Se calcula rasterizando el SVG en un lienzo reducido.
  */
 export async function measureAccuracy(svg: string, src: RasterImage): Promise<number> {
   const s = Math.min(1, SIZE / Math.max(src.width, src.height));
@@ -17,7 +17,7 @@ export async function measureAccuracy(svg: string, src: RasterImage): Promise<nu
     if (b[p + 3] < 128 && a[p + 3] < 128) { ok++; tot++; continue; }
     tot++;
     const d = Math.abs(a[p] - b[p]) + Math.abs(a[p + 1] - b[p + 1]) + Math.abs(a[p + 2] - b[p + 2]) + Math.abs(a[p + 3] - b[p + 3]);
-    if (d < 0.12 * 255 * 3) ok++;
+    if (d < 0.08 * 255 * 3) ok++;
   }
   return tot ? ok / tot : 0;
 }

@@ -1,4 +1,4 @@
-import { labDist } from './color';
+import { labDist, rgbToOklab } from './color';
 
 /** Componentes conexas (4-conectividad) sobre un mapa de etiquetas. */
 export interface Components {
@@ -78,10 +78,24 @@ export function regionStats(cc: Components, W: number, H: number): RegionStats {
  * (regiones de ~1–2 px de ancho cuyo color es intermedio entre sus vecinas).
  * Los píxeles eliminados se reparten entre las regiones vecinas creciendo desde el borde.
  */
-export function cleanupLabels(labels: Int32Array, lab: Float32Array, W: number, H: number, minArea: number) {
+export function cleanupLabels(labels: Int32Array, lab: Float32Array, W: number, H: number, minArea: number, rgba?: Uint8ClampedArray) {
   for (let pass = 0; pass < 3; pass++) {
     const cc = components(labels, W, H);
     const st = regionStats(cc, W, H);
+    // color medio real de cada región (más fiable que el de la paleta para franjas de borde)
+    let mean: Float32Array | null = null;
+    if (rgba) {
+      const acc = new Float64Array(cc.count * 3);
+      for (let i = 0; i < W * H; i++) {
+        const c = cc.comp[i] * 3, p = i * 4;
+        acc[c] += rgba[p]; acc[c + 1] += rgba[p + 1]; acc[c + 2] += rgba[p + 2];
+      }
+      mean = new Float32Array(cc.count * 3);
+      for (let c = 0; c < cc.count; c++) {
+        const a = st.area[c];
+        rgbToOklab(Math.round(acc[c * 3] / a), Math.round(acc[c * 3 + 1] / a), Math.round(acc[c * 3 + 2] / a), mean, c * 3);
+      }
+    }
     const remove = new Uint8Array(cc.count);
     let any = false;
     for (let c = 0; c < cc.count; c++) {
@@ -93,10 +107,11 @@ export function cleanupLabels(labels: Int32Array, lab: Float32Array, W: number, 
         .filter(([o]) => cc.label[o] !== cc.label[c] && cc.label[o] >= 0)
         .sort((p, q) => q[1] - p[1]);
       if (nb.length < 2) continue;
-      const la = cc.label[nb[0][0]] * 3, lb = cc.label[nb[1][0]] * 3, lc = cc.label[c] * 3;
+      const la = cc.label[nb[0][0]] * 3, lb = cc.label[nb[1][0]] * 3;
       if (la === lb) continue;
+      const cs = mean ?? lab, lc = mean ? c * 3 : cc.label[c] * 3;
       const dab = labDist(lab, la, lab, lb);
-      if (labDist(lab, la, lab, lc) + labDist(lab, lc, lab, lb) < dab * 1.2) { remove[c] = 1; any = true; }
+      if (labDist(lab, la, cs, lc) + labDist(cs, lc, lab, lb) < dab * 1.2) { remove[c] = 1; any = true; }
     }
     if (!any) return;
     // Crecimiento multi-fuente desde los píxeles conservados.
