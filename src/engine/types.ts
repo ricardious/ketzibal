@@ -85,6 +85,7 @@ export type ShapeKind =
   | 'star'
   | 'polygon'
   | 'path'
+  | 'clipped-circle'
   | 'silhouette'
   | 'stroke';
 

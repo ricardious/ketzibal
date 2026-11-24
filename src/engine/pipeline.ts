@@ -3,6 +3,7 @@ import { detectCorners, fitClosed, fitOpen, mapLoop, refineCorner, smoothClosed,
 import { quantize } from './quantize';
 import { cleanupLabels, components, growInto, majoritySmooth, maskHoles, regionMask, regionStats, type Components, type LocalMask, type RegionStats } from './regions';
 import { centerStroke, chainRuns, detectBrownInk, detectInk, distanceTransform, skeletonPaths, thin, type Ink } from './lineart';
+import { fitClippedCircle } from './arcs';
 import { recognize } from './shapes';
 import { detectGlobalSymmetry, detectSymmetry, mirrorLoop, mirrorShape, reflectPoint, symmetrizeHalf } from './symmetry';
 import type { BezierLoop, BezierPath, Layer, Progress, RasterImage, Shape, ShapeKind, SymmetryAxis, Vec, VectorizeParams, VectorizeResult } from './types';
@@ -391,7 +392,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     if (params.detectShapes) {
       const rec = recognize({
         pts: basePts, visible: axis ? new Uint8Array(basePts.length).fill(1) : visible,
-        area: outer.area, tol, allowCompletion: params.reconstructHidden, coverOk,
+        area: outer.area, tol, allowCompletion: params.reconstructHidden && !touchesNetwork, coverOk,
       });
       if (rec) {
         kind = rec.kind;
@@ -399,6 +400,15 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
         reconstructed = rec.reconstructed;
         fitError = rec.error;
         if (axis) shape = recognized = snapToAxis(rec.shape, axis);
+      }
+    }
+
+    if (!recognized && params.detectShapes && params.reconstructHidden && touchesNetwork && !stroke && c < cc.count) {
+      const lens = fitClippedCircle(m, tol);
+      if (lens) {
+        kind = 'clipped-circle';
+        shape = recognized = { type: 'path', loop: lens };
+        reconstructed = true;
       }
     }
 

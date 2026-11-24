@@ -11,6 +11,7 @@ export const KIND_NAMES: Record<ShapeKind, string> = {
   star: 'Estrella',
   polygon: 'Polígono',
   path: 'Trazado',
+  'clipped-circle': 'Círculo recortado',
   silhouette: 'Silueta',
   stroke: 'Trazo',
 };
