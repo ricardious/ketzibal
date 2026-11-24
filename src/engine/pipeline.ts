@@ -1,8 +1,8 @@
 import { traceContours, type Contour } from './contour';
 import { detectCorners, fitClosed, fitOpen, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
 import { quantize } from './quantize';
-import { cleanupLabels, components, growInto, maskHoles, regionMask, regionStats, type Components, type LocalMask, type RegionStats } from './regions';
-import { detectInk, distanceTransform, skeletonPaths, thin, type Ink } from './lineart';
+import { cleanupLabels, components, growInto, majoritySmooth, maskHoles, regionMask, regionStats, type Components, type LocalMask, type RegionStats } from './regions';
+import { chainRuns, detectInk, skeletonPaths, thin, type Ink } from './lineart';
 import { recognize } from './shapes';
 import { detectGlobalSymmetry, detectSymmetry, mirrorLoop, mirrorShape, reflectPoint, symmetrizeHalf } from './symmetry';
 import type { BezierLoop, BezierPath, Layer, Progress, RasterImage, Shape, ShapeKind, SymmetryAxis, Vec, VectorizeParams, VectorizeResult } from './types';
@@ -64,6 +64,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     ink = detectInk(cc0, regionStats(cc0, W, H), q.lab, W, H);
     if (ink) {
       growInto(q.labels, ink.mask.slice(), W, H, q.lab, false);
+      majoritySmooth(q.labels, ink.mask, W, H, q.hex.length, Math.max(2, Math.round(ink.width * 0.6)), 3);
       cleanupLabels(q.labels, q.lab, W, H, Math.max(2, params.minArea));
     }
   }
@@ -252,8 +253,13 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   const idOf = (c: number) => `capa-${nodes[c].rank + 1}`;
   const counters: Partial<Record<ShapeKind, number>> = {};
   const strokedRecords: { c: number; pts: Vec[]; outside: Int32Array; rank: number; width: number }[] = [];
-  const sigma = 0.6 + (params.smoothing / 100) * 3.4;
-  const tol = Math.max(0.25, params.tolerance);
+  let sigma = 0.6 + (params.smoothing / 100) * 3.4;
+  let tol = Math.max(0.25, params.tolerance);
+  if (ink) {
+    // con dibujo lineal los bordes son líneas medias de tinta: el ruido escala con el grosor
+    sigma = Math.max(sigma, ink.width * 0.45);
+    tol = Math.max(tol, ink.width * 0.1);
+  }
 
   for (let oi = 0; oi < order.length; oi++) {
     const c = order[oi];
@@ -486,7 +492,6 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       }
     }
     const skel = thin(ink.mask, W, H);
-    const dt = distanceTransform(ink.mask, W, H);
     const minLen = Math.max(3, ink.width * 0.8);
     const runs: { pts: Vec[]; idx: number[] }[] = [];
     for (const path of skeletonPaths(skel, W, H, ink.width * 1.5)) {
@@ -498,24 +503,27 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       }
       flush();
     }
-    // agrupar tramos que se tocan en un mismo trazo
-    const parent = runs.map((_, i) => i);
+    const chains = chainRuns(runs.map((r) => r.pts), ink.width);
+    // agrupar en una capa las líneas que se tocan
+    const parent = chains.map((_, i) => i);
     const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
-    const ends = runs.map((r) => [r.pts[0], r.pts[r.pts.length - 1]]);
-    for (let a = 0; a < runs.length; a++) for (let b = a + 1; b < runs.length; b++) {
-      if (ends[a].some((p) => ends[b].some((q) => Math.abs(p[0] - q[0]) <= 2 && Math.abs(p[1] - q[1]) <= 2))) parent[find(a)] = find(b);
+    const touch = ink.width * 1.2;
+    for (let a = 0; a < chains.length; a++) for (let b = 0; b < chains.length; b++) {
+      if (a === b || find(a) === find(b)) continue;
+      const A = chains[a];
+      if ([A[0], A[A.length - 1]].some((p) => chains[b].some((q) => (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 <= touch * touch))) parent[find(a)] = find(b);
     }
     const groups = new Map<number, number[]>();
-    runs.forEach((_, i) => { const g = find(i); if (!groups.has(g)) groups.set(g, []); groups.get(g)!.push(i); });
+    chains.forEach((_, i) => { const g = find(i); if (!groups.has(g)) groups.set(g, []); groups.get(g)!.push(i); });
     const out: Layer[] = [];
     let n = 0;
-    const ssig = Math.max(1, sigma * 0.8, ink.width * 0.35);
+    const ssig = Math.max(1, sigma, ink.width * 0.6);
     for (const idxs of groups.values()) {
       const paths: BezierPath[] = [];
-      const widths: number[] = [];
       let len = 0;
       for (const i of idxs) {
-        const r = runs[i];
+        const r = { pts: dedupe(chains[i]) };
+        if (r.pts.length < 2) continue;
         const closed = r.pts.length > 8 && Math.abs(r.pts[0][0] - r.pts[r.pts.length - 1][0]) <= 1.5 && Math.abs(r.pts[0][1] - r.pts[r.pts.length - 1][1]) <= 1.5;
         if (closed) {
           const ring = r.pts.slice(0, -1);
@@ -525,11 +533,10 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
           const sm = smoothOpen(r.pts, ssig);
           paths.push({ start: sm[0], segs: fitOpen(sm, tol) });
         }
-        for (const k of r.idx) widths.push(2 * dt[k] - 0.5);
         len += r.pts.length;
       }
-      widths.sort((a, b) => a - b);
-      const width = Math.max(1, widths[Math.floor(widths.length / 2)] ?? ink.width);
+      // todo el dibujo comparte un único grosor de línea
+      const width = ink.width;
       const shape: Shape = { type: 'strokes', paths };
       n++;
       out.push({
@@ -556,6 +563,19 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
 }
 
 // ───────────────────────── utilidades ─────────────────────────
+
+/** Remuestrea una polilínea a pasos de ~1 px (los empalmes y prolongaciones dejan saltos). */
+function dedupe(p: Vec[]): Vec[] {
+  const out: Vec[] = [p[0]];
+  for (let i = 1; i < p.length; i++) {
+    const a = out[out.length - 1], b = p[i];
+    const d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (d < 0.5) continue;
+    const n = Math.ceil(d);
+    for (let k = 1; k <= n; k++) out.push([a[0] + ((b[0] - a[0]) * k) / n, a[1] + ((b[1] - a[1]) * k) / n]);
+  }
+  return out;
+}
 
 function sub2(a: Vec, b: Vec): Vec { return [a[0] - b[0], a[1] - b[1]]; }
 

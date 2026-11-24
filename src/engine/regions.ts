@@ -162,6 +162,48 @@ export function growInto(labels: Int32Array, dead: Uint8Array, W: number, H: num
   return true;
 }
 
+/**
+ * Filtro de mayoría limitado a los píxeles de `area` (p. ej., la tinta retirada). Endereza las
+ * fronteras que el crecimiento por BFS deja bajo la tinta sin mover los bordes visibles.
+ */
+export function majoritySmooth(labels: Int32Array, area: Uint8Array, W: number, H: number, nLabels: number, r: number, iters: number) {
+  const K = nLabels + 1; // la última clase es "transparente" (-1)
+  const W1 = W + 1;
+  const ii = new Int32Array(K * W1 * (H + 1));
+  const idx: number[] = [];
+  for (let i = 0; i < W * H; i++) if (area[i]) idx.push(i);
+  if (!idx.length) return;
+  for (let it = 0; it < iters; it++) {
+    ii.fill(0);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const l = labels[y * W + x];
+        const k = l < 0 ? nLabels : l;
+        for (let c = 0; c < K; c++) {
+          const o = c * W1 * (H + 1);
+          ii[o + (y + 1) * W1 + x + 1] = ii[o + y * W1 + x + 1] + ii[o + (y + 1) * W1 + x] - ii[o + y * W1 + x] + (c === k ? 1 : 0);
+        }
+      }
+    }
+    const next = labels.slice();
+    let changed = 0;
+    for (const i of idx) {
+      const x = i % W, y = (i / W) | 0;
+      const x0 = Math.max(0, x - r), x1 = Math.min(W, x + r + 1), y0 = Math.max(0, y - r), y1 = Math.min(H, y + r + 1);
+      let best = -1, bn = -1;
+      for (let c = 0; c < K; c++) {
+        const o = c * W1 * (H + 1);
+        const n = ii[o + y1 * W1 + x1] - ii[o + y0 * W1 + x1] - ii[o + y1 * W1 + x0] + ii[o + y0 * W1 + x0];
+        if (n > bn) { bn = n; best = c; }
+      }
+      const l = best === nLabels ? -1 : best;
+      if (l !== labels[i]) { next[i] = l; changed++; }
+    }
+    labels.set(next);
+    if (!changed) break;
+  }
+}
+
 function hasLiveNeighbor(dead: Uint8Array, i: number, W: number, H: number) {
   const x = i % W, y = (i / W) | 0;
   return (x > 0 && !dead[i - 1]) || (x < W - 1 && !dead[i + 1]) || (y > 0 && !dead[i - W]) || (y < H - 1 && !dead[i + W]);
