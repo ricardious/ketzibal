@@ -108,19 +108,18 @@ export function quantize(img: RasterImage, k: number, seed = 1): Quantized {
   const lab = new Float32Array(K * 3);
   kept.forEach((c, i) => lab.set(centers.subarray(c * 3, c * 3 + 3), i * 3));
 
-  // 5. Asignar todos los píxeles (con caché por color exacto).
+  // 5. Asignar todos los píxeles con una tabla de 18 bits (6 bits por canal) calculada bajo demanda.
   const labels = new Int32Array(N);
-  const cache = new Map<number, number>();
+  const table = new Int16Array(1 << 18).fill(-1);
   const tmp = [0, 0, 0];
   for (let i = 0; i < N; i++) {
     const p = i * 4;
     if (data[p + 3] < ALPHA_CUTOFF) { labels[i] = -1; continue; }
-    const key = (data[p] << 16) | (data[p + 1] << 8) | data[p + 2];
-    let l = cache.get(key);
-    if (l === undefined) {
-      rgbToOklab(data[p], data[p + 1], data[p + 2], tmp);
-      l = nearest(tmp, 0, lab, K);
-      cache.set(key, l);
+    const key = ((data[p] >> 2) << 12) | ((data[p + 1] >> 2) << 6) | (data[p + 2] >> 2);
+    let l = table[key];
+    if (l < 0) {
+      rgbToOklab((data[p] & 0xfc) | 2, (data[p + 1] & 0xfc) | 2, (data[p + 2] & 0xfc) | 2, tmp);
+      l = table[key] = nearest(tmp, 0, lab, K);
     }
     labels[i] = l;
   }
