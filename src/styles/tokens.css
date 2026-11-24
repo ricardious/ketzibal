@@ -1,0 +1,56 @@
+/* Tipografía, espaciado, forma y movimiento — Ketzvia. */
+:root {
+  --font-display: 'Afacad Flux Variable', 'Afacad Flux', system-ui, sans-serif;
+  --font-sans: 'Instrument Sans Variable', 'Instrument Sans', system-ui, sans-serif;
+  --font-mono: 'Source Code Pro Variable', 'Source Code Pro', ui-monospace, monospace;
+
+  --gutter-xs: 4px;
+  --gutter-sm: 8px;
+  --gutter-md: 12px;
+  --gutter-lg: 16px;
+  --gutter-xl: 24px;
+  --section: 32px;
+  --page-margin: 16px;
+
+  --rounded-sm: 8px;
+  --rounded: 12px;
+  --rounded-md: 16px;
+  --rounded-lg: 20px;
+  --rounded-xl: 28px;
+  --rounded-full: 9999px;
+
+  --dur-state: 100ms;
+  --ease-state: ease-out;
+  --dur-enter: 180ms;
+  --ease-enter: cubic-bezier(0.2, 0, 0, 1);
+  --dur-exit: 120ms;
+  --ease-exit: cubic-bezier(0.3, 0, 1, 1);
+
+  --topbar-h: 48px;
+  --layers-w: 260px;
+  --inspector-w: 288px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-state: 0ms;
+    --dur-enter: 0ms;
+    --dur-exit: 0ms;
+  }
+}
+
+/* Escala tipográfica */
+.t-display-lg { font: 600 36px/44px var(--font-display); letter-spacing: -0.5px; }
+.t-headline-lg { font: 600 24px/30px var(--font-display); letter-spacing: -0.25px; }
+.t-headline-md { font: 600 18px/24px var(--font-display); }
+.t-title-md { font: 600 15px/20px var(--font-sans); }
+.t-title-sm { font: 600 13px/18px var(--font-sans); }
+.t-body-md { font: 400 14px/20px var(--font-sans); }
+.t-body-sm { font: 400 12px/16px var(--font-sans); }
+.t-label-lg { font: 500 13px/18px var(--font-sans); letter-spacing: 0.1px; }
+.t-label-md { font: 500 12px/16px var(--font-sans); letter-spacing: 0.2px; }
+.t-label-sm { font: 600 12px/16px var(--font-sans); letter-spacing: 0.4px; }
+.t-mono-sm { font: 500 12px/16px var(--font-mono); font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .t-display-lg { font-size: 28px; line-height: 34px; letter-spacing: -0.25px; }
+}
