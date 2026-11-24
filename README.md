@@ -45,6 +45,18 @@ La interfaz solo usa `engine/index.ts`. El motor recibe un búfer RGBA y devuelv
 7. **Figuras ocultas.** Los puntos del borde que lindan con una capa superior (o con el límite de la imagen) se marcan como no visibles. El ajuste usa solo los bordes visibles y la forma completada se valida: debe extenderse únicamente bajo capas superiores. Así, un círculo tapado por un cuadrado se exporta como el círculo completo. Los trazados libres se extienden 2 px bajo sus vecinas superiores para evitar rendijas.
 8. **Simetría.** El eje de cada figura se busca entre el vertical, el horizontal y los ejes principales, maximizando el IoU entre la máscara y su reflejo, con refinamiento subpíxel. Si supera el 94 %, se promedia cada mitad con el reflejo de la otra, se ajusta media figura y se refleja, lo que da un trazado exactamente simétrico. También se detecta un eje global de la composición: las figuras gemelas a ambos lados se vuelven reflejos exactos.
 
+### Dibujo lineal (ilustraciones con contorno)
+
+Si la imagen tiene líneas oscuras de grosor casi constante, se tratan como **tinta**:
+
+- Se detectan comparando, en cada componente oscura, su grosor medio (2·área/perímetro) con su radio inscrito, medido con una transformada de distancia por componente. Las figuras oscuras rellenas (ojos, sombreros) siguen siendo rellenos.
+- La tinta se retira y los rellenos crecen hasta la línea media del trazo.
+- Si una figura está delimitada por tinta, su unión completa se convierte en una **silueta** base; las piezas de su color dominante se integran en ella y el resto se apila encima.
+- Las capas cuyo borde es tinta en al menos un 80 % reciben `stroke` con el color y el grosor detectados.
+- La tinta restante (bigotes, boca, líneas interiores) se esqueletiza con el adelgazamiento de Zhang–Suen, se convierte en un grafo y se ajusta como trazados abiertos con extremos redondeados.
+
+Se puede desactivar con *Detectar contornos* en el inspector.
+
 ## Uso
 
 - **Importar imagen**: con el botón, arrastrando el archivo al lienzo o pegándolo con Ctrl+V. También hay una imagen de ejemplo.
