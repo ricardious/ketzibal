@@ -4,6 +4,8 @@ export interface TabItem<T extends string> {
   value: T;
   label: string;
   icon?: ReactNode;
+  /** Atajo de teclado que se muestra en el título. */
+  hint?: string;
 }
 
 interface TabsProps<T extends string> {
@@ -38,7 +40,7 @@ export function Tabs<T extends string>({ items, value, onChange, label, block, i
           aria-selected={it.value === value}
           tabIndex={it.value === value ? 0 : -1}
           aria-label={iconOnly ? it.label : undefined}
-          title={iconOnly ? it.label : undefined}
+          title={it.hint ? `${it.label} (${it.hint})` : iconOnly ? it.label : undefined}
           onClick={() => onChange(it.value)}
           onKeyDown={(e) => onKey(e, i)}
         >

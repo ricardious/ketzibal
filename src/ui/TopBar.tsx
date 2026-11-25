@@ -1,8 +1,10 @@
-import { Download, ImageUp, Layers, Moon, Redo2, SlidersHorizontal, Sun, SunMoon, Undo2 } from 'lucide-react';
+import { Copy, Download, ImageUp, Keyboard, Layers, Moon, Redo2, SlidersHorizontal, Sun, SunMoon, Undo2 } from 'lucide-react';
 import { useRef } from 'react';
 import { Button, IconButton } from './components/Button';
 import { ACCEPTED } from './lib/image';
-import { download } from './lib/sample';
+import { copySvg, exportFile } from './lib/actions';
+import { MOD } from './lib/shortcuts';
+import { HOME_URL } from '../shared/handoff';
 import { useStore, type Theme } from './store';
 
 const NEXT_THEME: Record<Theme, Theme> = { system: 'light', light: 'dark', dark: 'system' };
@@ -18,13 +20,8 @@ export function TopBar() {
   const hasLayers = useStore((s) => s.layers.length > 0);
   const theme = useStore((s) => s.theme);
   const panel = useStore((s) => s.panel);
-  const { loadFile, undo, redo, exportSvg, set } = useStore.getState();
-
-  const onExport = () => {
-    const svg = exportSvg();
-    const base = source?.name.replace(/\.[^.]+$/, '') || 'vectorizado';
-    download(svg, `${base}.svg`);
-  };
+  const { loadFile, undo, redo, set } = useStore.getState();
+  const canExport = hasLayers && status !== 'processing';
 
   const ThemeIcon = theme === 'light' ? Sun : theme === 'dark' ? Moon : SunMoon;
 
@@ -33,10 +30,10 @@ export function TopBar() {
       <IconButton className="only-compact" label="Capas" pressed={panel === 'layers'} onClick={() => set({ panel: panel === 'layers' ? null : 'layers' })}>
         <Layers />
       </IconButton>
-      <div className="brand">
-        <img src={`${import.meta.env.BASE_URL}ketzvia-simbolo.svg`} alt="" />
+      <a className="brand" href={HOME_URL} title="Volver a la página de inicio">
+        <img src={`${import.meta.env.BASE_URL}ketzvia-quetzal.svg`} alt="" />
         <span>Ketzibal</span>
-      </div>
+      </a>
       {source && (
         <div className="topbar__file">
           <b title={source.name}>{source.name}</b>
@@ -45,13 +42,15 @@ export function TopBar() {
       )}
       <div className="topbar__spacer" />
       <div className="topbar__group">
-        <IconButton label="Deshacer (Ctrl+Z)" disabled={!canUndo} onClick={undo}><Undo2 /></IconButton>
-        <IconButton label="Rehacer (Ctrl+Shift+Z)" disabled={!canRedo} onClick={redo}><Redo2 /></IconButton>
+        <IconButton label={`Deshacer (${MOD}+Z)`} disabled={!canUndo} onClick={undo}><Undo2 /></IconButton>
+        <IconButton label={`Rehacer (${MOD}+Mayús+Z)`} disabled={!canRedo} onClick={redo}><Redo2 /></IconButton>
+        <IconButton className="hide-compact" label="Atajos de teclado (?)" onClick={() => set({ shortcutsOpen: true })}><Keyboard /></IconButton>
         <IconButton label={THEME_LABEL[theme]} onClick={() => set({ theme: NEXT_THEME[theme] })}><ThemeIcon /></IconButton>
       </div>
       <span className="topbar__divider hide-compact" />
       <input
         ref={input}
+        id="file-import"
         type="file"
         accept={ACCEPTED.join(',')}
         hidden
@@ -61,12 +60,15 @@ export function TopBar() {
           e.target.value = '';
         }}
       />
-      <Button className="collapse-label" icon={<ImageUp />} onClick={() => input.current?.click()} aria-label="Importar imagen">
+      <Button className="collapse-label" icon={<ImageUp />} onClick={() => input.current?.click()} aria-label="Importar imagen" title={`Importar imagen (${MOD}+O)`}>
         <span className="label">Importar imagen</span>
       </Button>
-      <Button className="collapse-label" variant="primary" icon={<Download />} disabled={!hasLayers || status === 'processing'} onClick={onExport} aria-label="Exportar SVG">
-        <span className="label">Exportar SVG</span>
-      </Button>
+      <div className="split-btn">
+        <Button className="collapse-label" variant="primary" icon={<Download />} disabled={!canExport} onClick={exportFile} aria-label="Exportar SVG" title={`Exportar SVG (${MOD}+E)`}>
+          <span className="label">Exportar SVG</span>
+        </Button>
+        <button type="button" className="split-btn__more" disabled={!canExport} onClick={() => void copySvg()} aria-label="Copiar SVG" title={`Copiar SVG al portapapeles (${MOD}+Mayús+C)`}><Copy /></button>
+      </div>
       <IconButton className="only-compact" label="Inspector" pressed={panel === 'inspector'} onClick={() => set({ panel: panel === 'inspector' ? null : 'inspector' })}>
         <SlidersHorizontal />
       </IconButton>

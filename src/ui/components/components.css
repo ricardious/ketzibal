@@ -123,3 +123,45 @@
 .switch[aria-checked='true'] { background: var(--primary); border-color: var(--primary); }
 .switch[aria-checked='true']::after { transform: translateX(14px); background: var(--on-primary); }
 .switch:disabled { cursor: not-allowed; }
+
+/* ── MenuSelect ─────────────────────────────────────── */
+.mselect {
+  display: flex; align-items: center; gap: var(--gutter-sm); width: 100%; height: 32px; padding: 0 var(--gutter-sm) 0 var(--gutter-md);
+  border: 1px solid var(--outline-variant); border-radius: var(--rounded-sm);
+  background: var(--surface-container-lowest); color: var(--on-surface);
+  font: 500 13px/18px var(--font-sans); text-align: left;
+  transition: border-color var(--dur-state) var(--ease-state), background-color var(--dur-state) var(--ease-state);
+}
+.mselect:hover:not(:disabled) { border-color: var(--outline); }
+.mselect[aria-expanded='true'] { border-color: var(--outline); box-shadow: 0 2px 6px rgb(var(--shadow-color) / calc(0.08 * var(--shadow-strength))); }
+.mselect:focus-visible { outline: none; border-color: var(--outline); box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 22%, transparent); }
+.mselect:disabled { opacity: 0.45; cursor: not-allowed; }
+.mselect > svg { width: 16px; height: 16px; flex: none; color: var(--on-surface-variant); }
+.mselect__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mselect .mselect__chev { width: 14px; height: 14px; transition: transform var(--dur-enter) var(--ease-enter); }
+.mselect[aria-expanded='true'] .mselect__chev { transform: rotate(180deg); }
+
+.mselect__list {
+  position: fixed; z-index: 60; padding: 4px; max-width: 280px;
+  border: 1px solid var(--outline-variant); border-radius: var(--rounded);
+  background: var(--surface-container-low); color: var(--on-surface);
+  box-shadow: 0 2px 4px rgb(var(--shadow-color) / calc(0.06 * var(--shadow-strength))), 0 10px 28px rgb(var(--shadow-color) / calc(0.12 * var(--shadow-strength)));
+  animation: mselect-in var(--dur-enter) var(--ease-enter);
+  transform-origin: top center;
+}
+.mselect__list:focus { outline: none; }
+.mselect__list[data-up='true'] { transform: translateY(-100%); transform-origin: bottom center; animation-name: mselect-in-up; }
+.mselect__option {
+  display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-radius: var(--rounded-sm);
+  font: 500 13px/18px var(--font-sans); cursor: pointer; user-select: none;
+}
+.mselect__option svg { width: 16px; height: 16px; flex: none; color: var(--on-surface-variant); }
+.mselect__option { transition: background-color var(--dur-state) var(--ease-state), box-shadow var(--dur-state) var(--ease-state); }
+.mselect__option[data-active='true'] {
+  background: var(--surface-container-highest);
+  box-shadow: 0 1px 2px rgb(var(--shadow-color) / calc(0.1 * var(--shadow-strength))), 0 2px 6px rgb(var(--shadow-color) / calc(0.06 * var(--shadow-strength)));
+}
+.mselect__option[data-active='true'] svg { color: var(--on-surface); }
+@keyframes mselect-in { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes mselect-in-up { from { opacity: 0; transform: translateY(calc(-100% + 4px)); } }
+@media (prefers-reduced-motion: reduce) { .mselect__list { animation: none; } }

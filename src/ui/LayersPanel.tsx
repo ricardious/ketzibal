@@ -1,6 +1,6 @@
 import { FigurePicker } from './components/FigurePicker';
 import { Eye, EyeOff } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { KIND_NAMES, nodeCount, type Layer } from '../engine';
 import { IconButton } from './components/Button';
 import { List, ListItem } from './components/List';
@@ -11,9 +11,16 @@ export function LayersPanel() {
   const selectedId = useStore((s) => s.selectedId);
   const additionalIds = useStore(s => s.additionalIds);
   const open = useStore((s) => s.panel === 'layers');
+  const hoverId = useStore((s) => s.hoverId);
   const { select, updateLayer, moveLayer } = useStore.getState();
   const [drag, setDrag] = useState<{ id: string; over: string | null; before: boolean } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
+
+  // al seleccionar en el lienzo, mostrar la fila en la lista
+  useEffect(() => {
+    if (!selectedId) return;
+    document.querySelector(`[data-layer="${CSS.escape(selectedId)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [selectedId]);
 
   // de arriba (último en pintarse) hacia abajo
   const rows = [...layers].reverse();
@@ -31,6 +38,11 @@ export function LayersPanel() {
       const t = rows[Math.max(0, Math.min(rows.length - 1, r))];
       select(t.id);
       (document.querySelector(`[data-layer="${t.id}"]`) as HTMLElement | null)?.focus();
+    } else if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+      e.preventDefault();
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      select(l.id);
+      useStore.getState().set({ menu: { x: r.left + 24, y: r.bottom, id: l.id } });
     } else if (e.key === 'Enter' || e.key === 'F2') {
       e.preventDefault();
       setRenaming(l.id);
@@ -57,17 +69,25 @@ export function LayersPanel() {
       <div className="panel__body">
         <FigurePicker action="add" />
         {layers.length === 0 ? (
-          <p className="panel__empty">Importa una imagen para detectar sus figuras. Cada figura se convierte en una capa vectorial independiente, ordenada de afuera hacia adentro.</p>
+          <p className="panel__empty">Aquí aparecerán las figuras detectadas, una capa por figura, de la más externa a la más interna.</p>
         ) : (
           <List aria-multiselectable role="listbox" aria-label="Capas de la imagen">
             {rows.map((l) => {
-              const cls = ['layer-row', drag?.over === l.id && drag.id !== l.id ? (drag.before ? 'drop-before' : 'drop-after') : ''].join(' ');
+              const cls = ['layer-row', drag?.id === l.id ? 'is-dragging' : '', drag?.over === l.id && drag.id !== l.id ? (drag.before ? 'drop-before' : 'drop-after') : ''].join(' ');
               return (
                 <ListItem
                   key={l.id}
                   data-layer={l.id}
                   className={cls}
                   data-hidden={!l.visible}
+                  data-hover={hoverId === l.id}
+                  onPointerEnter={() => useStore.getState().set({ hoverId: l.id })}
+                  onPointerLeave={() => useStore.getState().set({ hoverId: null })}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    if (l.id !== selectedId) select(l.id);
+                    useStore.getState().set({ menu: { x: e.clientX, y: e.clientY, id: l.id } });
+                  }}
                   role="option"
                   tabIndex={l.id === selectedId || (!selectedId && l === rows[0]) ? 0 : -1}
                   interactive

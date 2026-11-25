@@ -6,7 +6,7 @@ Todo el procesamiento ocurre en el navegador, dentro de un Web Worker. Ninguna i
 
 ```bash
 pnpm install
-pnpm dev        # http://localhost:5173
+pnpm dev        # http://localhost:5173 (presentación) y /app/ (editor)
 pnpm build      # comprobación de tipos y compilación de producción en dist/
 pnpm test       # pruebas del motor geométrico
 ```
@@ -26,7 +26,9 @@ src/
 │   ├── svg.ts       Serialización SVG mínima
 │   ├── worker.ts    Punto de entrada del Web Worker
 │   └── client.ts    API asíncrona y cancelable para la interfaz
-└── ui/              Interfaz React (estado con Zustand)
+├── landing/         Página de presentación con la demostración interactiva
+├── shared/          Traspaso de la imagen de la presentación al editor
+└── ui/              Interfaz React del editor (estado con Zustand)
     ├── components/  Componentes del sistema de diseño Ketzvia
     ├── store.ts     Estado, historial (deshacer y rehacer) y métrica de precisión
     └── …            Barra superior, panel de capas, lienzo e inspector
@@ -59,6 +61,12 @@ Se puede desactivar con *Detectar contornos* en el inspector.
 
 ## Uso
 
+La página de inicio (`/`) presenta la herramienta con una demostración interactiva; soltar o pegar una imagen en ella la abre directamente en el editor (`/app/`). `/app/?ejemplo` carga la imagen de ejemplo.
+
+- **Atajos**: pulsa **?** en el editor para ver la lista completa. Vistas con 1–4, herramientas de dibujo con V, C, R, T, L, P y K (dividir), Ctrl+D para duplicar, H para ocultar, [ y ] para reordenar, Ctrl+E para exportar y Ctrl+Mayús+C para copiar el SVG.
+- **Clic derecho** sobre una capa (en el lienzo o en la lista) abre sus acciones. Mantén **Espacio** o usa el botón central para desplazar el lienzo; doble clic en el fondo lo ajusta a la vista.
+- **Dibujo**: Mayús iguala proporciones (o fija el ángulo de líneas y cortes en pasos de 45°) y Alt dibuja desde el centro.
+
 - **Importar imagen**: con el botón, arrastrando el archivo al lienzo o pegándolo con Ctrl+V. También hay una imagen de ejemplo.
 - **Vistas**: *Original*, *Vectorizado*, *Comparar* (divisor arrastrable) y *Superponer* (opacidad ajustable). *Contornos* muestra la estructura alámbrica y *Ejes de simetría* muestra las guías.
 - **Capas**: selecciona una capa en la lista o en el lienzo. Arrastra para reordenar (o Alt+↑/↓). Doble clic o F2 para renombrar. Usa el ojo para ocultarla.
@@ -74,3 +82,13 @@ La métrica **Precisión** rasteriza el SVG resultante y lo compara píxel a pí
 - Está pensado para ilustraciones, logotipos e iconos de colores planos. Las fotografías y los degradados se reducen a la paleta y no se generan degradados SVG.
 - La compleción de figuras ocultas solo es posible cuando se ve al menos parte de cada lado. Si un lado queda completamente tapado, se conserva la forma visible.
 - Los bordes se sitúan con una precisión de unos 0,3 px (no se aprovecha aún la cobertura subpíxel del antialiasing). En vértices muy agudos ese error se amplifica.
+
+## Contribuir
+
+Las contribuciones son bienvenidas. Antes de abrir un pull request, comprueba que pasan `pnpm typecheck` y `pnpm test`. Si el cambio afecta al motor, añade una prueba en `src/engine/*.test.ts`.
+
+## Licencia
+
+Ketzibal es software libre bajo la [GNU Affero General Public License v3.0](LICENSE). Puedes usarlo, estudiarlo, modificarlo y redistribuirlo, pero si distribuyes una versión modificada o la ofreces como servicio a través de una red, debes publicar su código fuente con la misma licencia.
+
+El nombre Ketzvia, el símbolo del quetzal y su identidad visual no están cubiertos por esta licencia. Si publicas una versión modificada, usa otro nombre y otro símbolo.

@@ -7,6 +7,8 @@ import { measureAccuracy } from './lib/accuracy';
 
 export type ViewMode = 'split' | 'original' | 'vector' | 'overlay';
 export type Theme = 'system' | 'light' | 'dark';
+export interface Toast { id: number; text: string; action?: { label: string; run: () => void } }
+let toastSeq = 0;
 
 interface State {
   source: SourceImage | null;
@@ -37,6 +39,10 @@ interface State {
   pan: [number, number];
   theme: Theme;
   panel: 'layers' | 'inspector' | null;
+  hoverId: string | null;
+  toasts: Toast[];
+  shortcutsOpen: boolean;
+  menu: { x: number; y: number; id: string } | null;
 
   loadFile: (f: File) => Promise<void>;
   setParam: <K extends keyof VectorizeParams>(k: K, v: VectorizeParams[K]) => void;
@@ -52,6 +58,10 @@ interface State {
   beginEdit: () => void;
   moveLayer: (id: string, toIndex: number) => void;
   deleteLayer: (id: string) => void;
+  duplicateLayer: (id: string) => void;
+  toast: (text: string, action?: Toast['action']) => void;
+  dismissToast: (id: number) => void;
+  fit: () => void;
   undo: () => void;
   redo: () => void;
 
@@ -113,6 +123,10 @@ export const useStore = create<State>((set, get) => {
     pan: [0, 0],
     theme: readTheme(),
     panel: null,
+    hoverId: null,
+    toasts: [],
+    shortcutsOpen: false,
+    menu: null,
 
     async loadFile(file) {
       set({ status: 'loading', error: null });
@@ -230,9 +244,30 @@ export const useStore = create<State>((set, get) => {
 
     deleteLayer(id) {
       const { selectedId, isolatedId } = get();
+      const gone = get().layers.find((l) => l.id === id);
+      if (!gone) return;
       commit(get().layers.filter((l) => l.id !== id));
-      set({ additionalIds: [], selectedId: selectedId === id ? null : selectedId, isolatedId: isolatedId === id ? null : isolatedId });
+      set({ additionalIds: [], hoverId: null, selectedId: selectedId === id ? null : selectedId, isolatedId: isolatedId === id ? null : isolatedId });
+      get().toast(`«${gone.name}» eliminada`, { label: 'Deshacer', run: () => { get().undo(); if (get().layers.some((l) => l.id === id)) set({ selectedId: id }); } });
     },
+
+    duplicateLayer(id) {
+      const { layers, status } = get();
+      const i = layers.findIndex((l) => l.id === id);
+      if (i < 0 || status !== 'done' || layers[i].kind === 'background') return;
+      const src = layers[i];
+      const copy: Layer = { ...src, id: crypto.randomUUID(), name: `${src.name} (copia)`, dx: src.dx + 8, dy: src.dy + 8 };
+      commit([...layers.slice(0, i + 1), copy, ...layers.slice(i + 1)]);
+      set({ selectedId: copy.id, additionalIds: [], isolatedId: get().isolatedId ? copy.id : null });
+    },
+
+    toast(text, action) {
+      const t: Toast = { id: ++toastSeq, text, action };
+      set({ toasts: [...get().toasts.slice(-2), t] });
+      setTimeout(() => get().dismissToast(t.id), action ? 6000 : 2800);
+    },
+    dismissToast: (id) => set({ toasts: get().toasts.filter((t) => t.id !== id) }),
+    fit: () => set({ zoom: 1, pan: [0, 0] }),
 
     undo() {
       const { past, layers, future } = get();
