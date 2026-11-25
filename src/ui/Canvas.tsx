@@ -1,21 +1,22 @@
 import { Focus, Columns2, Image as ImageIcon, ImageUp, Layers2, Maximize, Minus, Plus, Scan, Shapes, Sparkles, SplitSquareHorizontal, Spline } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { shapeArea } from '../engine/shapes';
-import { shapeToD, type Layer, type Shape, type SymmetryAxis, type Vec } from '../engine';
+import { KIND_NAMES, nodeCount, shapeToD, type Layer, type Shape, type SymmetryAxis, type Vec } from '../engine';
 import { DrawingTools } from './DrawingTools';
 import { Button, IconButton } from './components/Button';
 import { Slider } from './components/Slider';
 import { Tabs } from './components/Tabs';
 import { moveNode, type CurveNode } from './lib/edit-node';
 import { ACCEPTED } from './lib/image';
-import { sampleFile } from './lib/sample';
+import { loadSample, zoomBy } from './lib/actions';
+import { MOD } from './lib/shortcuts';
 import { useStore, type ViewMode } from './store';
 
 const MODES = [
-  { value: 'original' as ViewMode, label: 'Original', icon: <ImageIcon /> },
-  { value: 'vector' as ViewMode, label: 'Vectorizado', icon: <Shapes /> },
-  { value: 'split' as ViewMode, label: 'Comparar', icon: <Columns2 /> },
-  { value: 'overlay' as ViewMode, label: 'Superponer', icon: <Layers2 /> },
+  { value: 'original' as ViewMode, label: 'Original', icon: <ImageIcon />, hint: '1' },
+  { value: 'vector' as ViewMode, label: 'Vectorizado', icon: <Shapes />, hint: '2' },
+  { value: 'split' as ViewMode, label: 'Comparar', icon: <Columns2 />, hint: '3' },
+  { value: 'overlay' as ViewMode, label: 'Superponer', icon: <Layers2 />, hint: '4' },
 ];
 
 export function layerD(l: Layer) {
@@ -45,7 +46,10 @@ export function Canvas() {
 
   const box = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
-  const [hover, setHover] = useState<string | null>(null);
+  const hover = useStore((s) => s.hoverId);
+  const setHover = (id: string | null) => { if (useStore.getState().hoverId !== id) set({ hoverId: id }); };
+  const tip = useRef<HTMLDivElement>(null);
+  const [spaceHeld, setSpaceHeld] = useState(false);
   const [dropOver, setDropOver] = useState(false);
   const [panning, setPanning] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -93,6 +97,18 @@ export function Canvas() {
     return () => el.removeEventListener('wheel', onWheel);
   }, [size.w, size.h, set]);
 
+  // Mantener Espacio para desplazar el lienzo con el puntero, como en otros editores.
+  useEffect(() => {
+    const typing = (e: KeyboardEvent) => (e.target as HTMLElement).closest('input, textarea, select, button, [role="option"], .mselect__list, .menu');
+    const down = (e: KeyboardEvent) => { if (e.code === 'Space' && !typing(e) && useStore.getState().source) { e.preventDefault(); if (!e.repeat) setSpaceHeld(true); } };
+    const up = (e: KeyboardEvent) => { if (e.code === 'Space') setSpaceHeld(false); };
+    const blur = () => setSpaceHeld(false);
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', blur);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', blur); };
+  }, []);
+
   const visibleLayers = useMemo(
     () => layers.filter((l) => l.visible && (!isolatedId || l.id === isolatedId)),
     [layers, isolatedId],
@@ -102,6 +118,8 @@ export function Canvas() {
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (!source) return;
+    if (spaceHeld || e.button === 1) { e.preventDefault(); return startPan(e); }
+    if (e.button === 2) return;
     const target = (e.target as Element).closest('[data-id]') as SVGElement | null;
     const id = target?.getAttribute('data-id');
     const canPick = view !== 'original' && e.button === 0;
@@ -116,9 +134,11 @@ export function Canvas() {
       target!.setPointerCapture(e.pointerId);
       const move = (ev: PointerEvent) => {
         const p = toImage(ev.clientX, ev.clientY);
-        const dx = p[0] - start[0], dy = p[1] - start[1];
+        let dx = p[0] - start[0], dy = p[1] - start[1];
         if (!moved && Math.hypot(dx, dy) * s < 3) return;
-        if (!moved) { beginEdit(); moved = true; }
+        if (!moved) { beginEdit(); moved = true; setHover(null); }
+        // Mayús: restringir al eje dominante
+        if (ev.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
         updateLayer(id, { dx: round(d0[0] + dx), dy: round(d0[1] + dy) }, false);
       };
       const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
@@ -187,6 +207,23 @@ export function Canvas() {
   };
   const isFileDrag = (e: React.DragEvent) => e.dataTransfer.types.includes('Files');
 
+  const onContextMenu = (e: React.MouseEvent) => {
+    const id = (e.target as Element).closest('[data-id]')?.getAttribute('data-id');
+    if (!id || view === 'original') return;
+    e.preventDefault();
+    const st = useStore.getState();
+    if (id !== st.selectedId && !st.additionalIds.includes(id)) select(id);
+    set({ menu: { x: e.clientX, y: e.clientY, id } });
+  };
+
+  const onHoverMove = (e: React.PointerEvent) => {
+    const el = tip.current;
+    if (!el) return;
+    const r = box.current!.getBoundingClientRect();
+    el.style.transform = `translate(${e.clientX - r.left + 14}px, ${e.clientY - r.top + 18}px)`;
+  };
+  const hovered = hover && !panning ? layers.find((l) => l.id === hover) : null;
+
   const showVector = view !== 'original';
   const showImage = !!isolatedId || view !== 'vector';
   const vectorClip = view === 'split' ? `inset(0 0 0 ${split * 100}%)` : undefined;
@@ -197,7 +234,10 @@ export function Canvas() {
       ref={box}
       className="canvas"
       data-panning={panning}
+      data-space={spaceHeld}
       onPointerDown={onPointerDown}
+      onContextMenu={onContextMenu}
+      onDoubleClick={(e) => { if (source && !(e.target as Element).closest('[data-id], .toolbar, .drawing-tools, .split-handle')) useStore.getState().fit(); }}
       onDragOver={(e) => { if (isFileDrag(e)) { e.preventDefault(); setDropOver(true); } }}
       onDragLeave={(e) => { if (e.currentTarget === e.target) setDropOver(false); }}
       onDrop={onDrop}
@@ -206,15 +246,15 @@ export function Canvas() {
       {!source && (
         <div className="dropzone" data-over={dropOver}>
           <div className="dropzone__card">
-            <img src={`${import.meta.env.BASE_URL}ketzvia-simbolo.svg`} alt="" />
-            <h1 className="t-headline-lg">Vectorización por capas</h1>
-            <p className="t-body-md">Convierte PNG, JPG o WebP en SVG reconstruyendo cada figura como una capa geométrica independiente.</p>
+            <div className="dropzone__glyph" aria-hidden><ImageUp /></div>
+            <h1 className="t-headline-lg">{dropOver ? 'Suelta para vectorizar' : 'Trae una imagen'}</h1>
+            <p className="t-body-md">PNG, JPG o WebP. Cada figura se convierte en una capa SVG que puedes mover, recolorear y editar.</p>
             <div className="dropzone__actions">
               <input ref={fileInput} type="file" accept={ACCEPTED.join(',')} hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) void loadFile(f); e.target.value = ''; }} />
-              <Button variant="primary" icon={<ImageUp />} onClick={() => fileInput.current?.click()}>Importar imagen</Button>
-              <Button variant="outline" icon={<Sparkles />} onClick={() => void sampleFile().then(loadFile)}>Usar imagen de ejemplo</Button>
+              <Button variant="primary" icon={<ImageUp />} onClick={() => fileInput.current?.click()}>Elegir archivo</Button>
+              <Button variant="outline" icon={<Sparkles />} onClick={() => void loadSample()}>Probar con el ejemplo</Button>
             </div>
-            <span className="dropzone__hint">También puedes arrastrar o pegar una imagen. Todo el procesamiento ocurre en tu navegador.</span>
+            <span className="dropzone__hint">Arrastra el archivo aquí o pégalo con <kbd>{MOD}</kbd> <kbd>V</kbd>. La imagen no sale de tu navegador.</span>
           </div>
         </div>
       )}
@@ -234,6 +274,7 @@ export function Canvas() {
               }}
               onPointerOver={(e) => setHover((e.target as Element).getAttribute('data-id'))}
               onPointerOut={() => setHover(null)}
+              onPointerMove={onHoverMove}
             >
               {!showImage && <rect width={iw} height={ih} fill="#fff" />}
               <defs>{!isolatedId && visibleLayers.filter(l => l.kind === 'clipped-circle').map(l => (
@@ -294,7 +335,12 @@ export function Canvas() {
       )}
       {status === 'loading' && <div className="status-chip" role="status"><span className="dot" />Leyendo imagen…</div>}
       {error && <div className="error-banner" role="alert">{error}</div>}
-      {dropOver && source && <div className="drop-veil" />}
+      {dropOver && source && <div className="drop-veil"><span>Suelta para reemplazar la imagen</span></div>}
+      {source && view !== 'original' && (
+        <div ref={tip} className="hover-tip" data-show={!!hovered && hovered.id !== selectedId && !isolatedId} aria-hidden>
+          {hovered && <><b>{hovered.name}</b><span>{KIND_NAMES[hovered.kind]} · {nodeCount(hovered.shape) + hovered.holes.reduce((a, h) => a + nodeCount(h), 0)} nodos</span></>}
+        </div>
+      )}
 
       {source && status === 'done' && <DrawingTools key={source.url + (selectedId ?? '') + (isolatedId ?? '')} selected={selected} scale={s} tx={tx} ty={ty} />}
 
@@ -305,13 +351,13 @@ export function Canvas() {
             <Slider label="Opacidad del vector" value={Math.round(overlayOpacity * 100)} min={0} max={100} onChange={(v) => set({ overlayOpacity: v / 100 })} format={(v) => `${v}%`} />
           )}
           <span className="toolbar__sep hide-mobile" />
-          <IconButton size="sm" label="Contornos" pressed={showOutlines} onClick={() => set({ showOutlines: !showOutlines })}><Spline /></IconButton>
-          <IconButton size="sm" label="Ejes de simetría" pressed={showAxes} onClick={() => set({ showAxes: !showAxes })}><Scan /></IconButton>
+          <IconButton size="sm" label="Contornos (O)" pressed={showOutlines} onClick={() => set({ showOutlines: !showOutlines })}><Spline /></IconButton>
+          <IconButton size="sm" label="Ejes de simetría (E)" pressed={showAxes} onClick={() => set({ showAxes: !showAxes })}><Scan /></IconButton>
           <span className="toolbar__sep" />
-          <IconButton size="sm" className="hide-mobile" label="Alejar" onClick={() => set({ zoom: clampZoom(zoom / 1.25) })}><Minus /></IconButton>
+          <IconButton size="sm" className="hide-mobile" label="Alejar (−)" onClick={() => zoomBy(1 / 1.25)}><Minus /></IconButton>
           <button type="button" className="toolbar__zoom" title="Restablecer zoom al 100%" onClick={() => set({ zoom: 1 / Math.max(0.01, fit), pan: [0, 0] })}>{Math.round(s * 100)}%</button>
-          <IconButton size="sm" className="hide-mobile" label="Acercar" onClick={() => set({ zoom: clampZoom(zoom * 1.25) })}><Plus /></IconButton>
-          <IconButton size="sm" label="Ajustar a la vista" onClick={() => set({ zoom: 1, pan: [0, 0] })}><Maximize /></IconButton>
+          <IconButton size="sm" className="hide-mobile" label="Acercar (+)" onClick={() => zoomBy(1.25)}><Plus /></IconButton>
+          <IconButton size="sm" label="Ajustar a la vista (0)" onClick={() => useStore.getState().fit()}><Maximize /></IconButton>
         </div>
       )}
     </main>

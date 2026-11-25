@@ -1,6 +1,7 @@
 import type { RasterImage } from '../../engine';
 
-export const ACCEPTED = ['image/png', 'image/jpeg', 'image/webp'];
+export { ACCEPTED } from '../../shared/handoff';
+import { ACCEPTED } from '../../shared/handoff';
 
 export interface SourceImage {
   name: string;

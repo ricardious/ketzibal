@@ -6,6 +6,7 @@ import { Button } from './components/Button';
 import { Slider } from './components/Slider';
 import { Tabs } from './components/Tabs';
 import { Toggle } from './components/Toggle';
+import { copyColor } from './lib/actions';
 import { useStore } from './store';
 
 type Tab = 'params' | 'layer';
@@ -82,7 +83,7 @@ function Params() {
             <h3 className="section__title" id="s-pal">Paleta</h3>
             <div className="palette">
               {palette.map((c) => (
-                <button key={c} type="button" style={{ background: c }} title={c} aria-label={`Copiar ${c}`} onClick={() => void navigator.clipboard?.writeText(c)} />
+                <button key={c} type="button" style={{ background: c }} title={c} aria-label={`Copiar ${c}`} onClick={() => void copyColor(c)} />
               ))}
             </div>
           </section>

@@ -38,6 +38,9 @@
   --inverse-surface: #241E2C;
   --inverse-on-surface: #F5F1F9;
   --inverse-primary: #D8B4FE;
+  /* sombras y velos: siempre oscuros, nunca el inverso de la superficie */
+  --shadow-color: 33 28 41;
+  --shadow-strength: 1;
   color-scheme: light;
 }
 
@@ -77,6 +80,8 @@
     --inverse-surface: #FAF8FC;
     --inverse-on-surface: #211C29;
     --inverse-primary: #7E22CE;
+    --shadow-color: 0 0 0;
+    --shadow-strength: 2.4;
     color-scheme: dark;
   }
 }
@@ -116,5 +121,7 @@
   --inverse-surface: #FAF8FC;
   --inverse-on-surface: #211C29;
   --inverse-primary: #7E22CE;
+  --shadow-color: 0 0 0;
+  --shadow-strength: 2.4;
   color-scheme: dark;
 }
