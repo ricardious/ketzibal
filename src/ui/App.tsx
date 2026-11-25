@@ -64,7 +64,9 @@ export function App() {
       }
       const sel = st.layers.find((l) => l.id === st.selectedId);
       if (!sel) return;
-      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); st.deleteLayer(sel.id); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault();
+        if (!st.isolatedId) st.deleteLayer(sel.id);
+        return; }
       if (mod && k === 'd') { e.preventDefault(); st.duplicateLayer(sel.id); return; }
       if (!mod && k === 'h') { st.updateLayer(sel.id, { visible: !sel.visible }); return; }
       if (!mod && (e.key === '[' || e.key === ']')) {

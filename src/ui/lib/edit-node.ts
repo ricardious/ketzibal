@@ -46,3 +46,39 @@ export function moveNode(shape: Shape, node: CurveNode, delta: Vec): Shape {
   }
   return shape.type === 'path' ? { type: 'path', loop } : { type: 'strokes', paths: loops.map((p, i) => i === node.loop ? loop : p) };
 }
+
+/** Elimina un ancla y enlaza sus vecinos conservando los controles exteriores. */
+export function removeNode(shape: Shape, node: CurveNode): Shape | null {
+  if (node.point !== 'start' && node.point !== 'p') return null;
+  if (shape.type === 'polygon') {
+    if (shape.points.length <= 3 || node.segment < 0 || node.segment >= shape.points.length) return null;
+    return { ...shape, points: shape.points.filter((_, i) => i !== node.segment) };
+  }
+  if (shape.type !== 'path' && shape.type !== 'strokes') return null;
+  const original = shape.type === 'path' ? shape.loop : shape.paths[node.loop];
+  if (!original || !original.segs.length) return null;
+  const loop: BezierPath = { ...original, segs: [...original.segs] };
+  const segs = loop.segs;
+  const closed = shape.type === 'path' || loop.closed;
+  const end = segs[segs.length - 1].p;
+  if (closed && (end[0] !== loop.start[0] || end[1] !== loop.start[1])) {
+    segs.push({ c1: end, c2: loop.start, p: loop.start, line: true });
+  }
+  if (segs.length <= (closed ? 3 : 1)) return null;
+  let i = node.point === 'start' ? -1 : node.segment;
+  if (i >= segs.length || i < -1) return null;
+  if (closed && (i === -1 || i === segs.length - 1)) {
+    // Mueve el inicio al vecino anterior para tratar el cierre como cualquier ancla.
+    loop.start = segs[segs.length - 2].p;
+    segs.unshift(segs.pop()!);
+    i = 0;
+  }
+  if (i === -1) loop.start = segs.shift()!.p;
+  else if (i === segs.length - 1) segs.pop();
+  else {
+    const a = segs[i], b = segs[i + 1];
+    segs.splice(i, 2, { c1: a.c1, c2: b.c2, p: b.p, line: !!a.line && !!b.line });
+  }
+  return shape.type === 'path' ? { ...shape, loop }
+    : { ...shape, paths: shape.paths.map((p, i) => i === node.loop ? loop : p) };
+}

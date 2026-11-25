@@ -6,7 +6,7 @@ import { DrawingTools } from './DrawingTools';
 import { Button, IconButton } from './components/Button';
 import { Slider } from './components/Slider';
 import { Tabs } from './components/Tabs';
-import { moveNode, type CurveNode } from './lib/edit-node';
+import { moveNode, removeNode, type CurveNode } from './lib/edit-node';
 import { ACCEPTED } from './lib/image';
 import { loadSample, zoomBy } from './lib/actions';
 import { MOD } from './lib/shortcuts';
@@ -188,6 +188,17 @@ export function Canvas() {
     el.addEventListener('lostpointercapture', end);
   };
 
+  const deleteAnchor = (node: CurveNode) => {
+    if (!selected || selected.id !== isolatedId) return;
+    const shape = removeNode(selected.shape, node);
+    if (!shape) {
+      useStore.getState().toast('La figura necesita los nodos que quedan.');
+      return;
+    }
+    updateLayer(selected.id, { shape, freeform: shape, recognized: undefined, symmetry: null,
+      reconstructed: false, fitError: 0, area: shape.type === 'strokes' ? selected.area : shapeArea(shape) });
+  };
+
   const onSplitDown = (e: React.PointerEvent) => {
     e.stopPropagation();
     const move = (ev: PointerEvent) => {
@@ -311,7 +322,7 @@ export function Canvas() {
               <g transform={`translate(${selected.dx} ${selected.dy})`}>
                 <path className="sel-outline" d={dMap.get(selected.id)} />
                 {showAxes && selected.symmetry && !selected.symmetry.global && <AxisLine axis={selected.symmetry} w={iw} h={ih} />}
-                <Nodes shape={selected.shape} scale={s} onDrag={isolatedId ? dragNode : undefined} />
+                <Nodes key={selected.id} onDelete={isolatedId ? deleteAnchor : undefined} shape={selected.shape} scale={s} onDrag={isolatedId ? dragNode : undefined} />
               </g>
             )}
           </svg>
@@ -375,7 +386,7 @@ function AxisLine({ axis, w, h, global }: { axis: SymmetryAxis; w: number; h: nu
 }
 
 /** Nodos de la forma seleccionada (y manejadores de Bézier). */
-function Nodes({ shape, scale, onDrag }: { shape: Shape; scale: number; onDrag?: (e: React.PointerEvent<SVGElement>, node: CurveNode) => void }) {
+function Nodes({ shape, scale, onDrag, onDelete }: { onDelete?: (node: CurveNode) => void; shape: Shape; scale: number; onDrag?: (e: React.PointerEvent<SVGElement>, node: CurveNode) => void }) {
   const r = 3.5 / scale;
   const anchors: Vec[] = [];
   const handles: [Vec, Vec][] = [];
@@ -424,11 +435,25 @@ function Nodes({ shape, scale, onDrag }: { shape: Shape; scale: number; onDrag?:
   if (shape.type === 'circle' || shape.type === 'ellipse' || shape.type === 'rect') {
     anchors.forEach((_, segment) => anchorNodes.push({ loop: 0, segment, point: 'p' }));
   }
+  const editable = !!onDelete && (shape.type === 'strokes' || shape.type === 'path' || shape.type === 'polygon');
   return (
     <g>
       {handles.map(([a, b], i) => <line key={`l${i}`} className="ctrl-line" x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} />)}
       {handles.map(([, b], i) => <circle {...events(handleNodes[i])} key={`h${i}`} className="node--ctrl" cx={b[0]} cy={b[1]} r={r * 0.6} />)}
-      {anchors.map((p, i) => <rect {...events(anchorNodes[i])} key={i} className="node" x={p[0] - r} y={p[1] - r} width={2 * r} height={2 * r} rx={r * 0.3} />)}
+      {anchors.map((p, i) => <rect {...events(anchorNodes[i])} key={i} className="node" tabIndex={editable ? 0 : undefined}
+        aria-label={editable ? `Nodo ${i + 1}` : undefined}
+        onPointerDown={onDrag ? e => {
+          if (editable && e.button === 0) e.currentTarget.focus({ preventScroll: true });
+          onDrag(e, anchorNodes[i]);
+        } : undefined}
+        onKeyDown={editable ? e => {
+          if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.repeat) return;
+          e.currentTarget.blur();
+          onDelete?.(anchorNodes[i]);
+        } : undefined} x={p[0] - r} y={p[1] - r} width={2 * r} height={2 * r} rx={r * 0.3} />)}
     </g>
   );
 }
