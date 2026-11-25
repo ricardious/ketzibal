@@ -58,6 +58,9 @@ export function Canvas() {
   const [spaceHeld, setSpaceHeld] = useState(false);
   const [dropOver, setDropOver] = useState(false);
   const [panning, setPanning] = useState(false);
+  const [drag, setDrag] = useState<'layer' | 'node' | null>(null);
+  const [additive, setAdditive] = useState(false);
+  const [offArtboard, setOffArtboard] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useLayoutEffect(() => {
@@ -106,9 +109,10 @@ export function Canvas() {
   // Mantener Espacio para desplazar el lienzo con el puntero, como en otros editores.
   useEffect(() => {
     const typing = (e: KeyboardEvent) => (e.target as HTMLElement).closest('input, textarea, select, button, [role="option"], .mselect__list, .menu');
-    const down = (e: KeyboardEvent) => { if (e.code === 'Space' && !typing(e) && useStore.getState().source) { e.preventDefault(); if (!e.repeat) setSpaceHeld(true); } };
-    const up = (e: KeyboardEvent) => { if (e.code === 'Space') setSpaceHeld(false); };
-    const blur = () => setSpaceHeld(false);
+    const mods = (e: KeyboardEvent) => setAdditive(e.shiftKey || e.ctrlKey || e.metaKey);
+    const down = (e: KeyboardEvent) => { mods(e); if (e.code === 'Space' && !typing(e) && useStore.getState().source) { e.preventDefault(); if (!e.repeat) setSpaceHeld(true); } };
+    const up = (e: KeyboardEvent) => { mods(e); if (e.code === 'Space') setSpaceHeld(false); };
+    const blur = () => { setSpaceHeld(false); setAdditive(false); };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
     window.addEventListener('blur', blur);
@@ -121,6 +125,17 @@ export function Canvas() {
   );
   const dMap = useMemo(() => new Map(layers.map((l) => [l.id, layerD(l)])), [layers]);
   const selected = layers.find((l) => l.id === selectedId) ?? null;
+
+  // ¿La pieza seleccionada sobresale de la imagen? Se sigue viendo, pero el SVG exportado la recorta.
+  const vectorSvg = useRef<SVGSVGElement>(null);
+  useLayoutEffect(() => {
+    const el = selected && selected.kind !== 'background'
+      ? vectorSvg.current?.querySelector<SVGGraphicsElement>(`[data-id="${CSS.escape(selected.id)}"]`) : null;
+    if (!el) { setOffArtboard(false); return; }
+    const b = el.getBBox(), t = 0.5;
+    const x = b.x + selected!.dx, y = b.y + selected!.dy;
+    setOffArtboard(x < -t || y < -t || x + b.width > iw + t || y + b.height > ih + t);
+  }, [selected, iw, ih, view]);
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (!source) return;
@@ -142,14 +157,15 @@ export function Canvas() {
         const p = toImage(ev.clientX, ev.clientY);
         let dx = p[0] - start[0], dy = p[1] - start[1];
         if (!moved && Math.hypot(dx, dy) * s < 3) return;
-        if (!moved) { beginEdit(); moved = true; setHover(null); }
+        if (!moved) { beginEdit(); moved = true; setHover(null); setDrag('layer'); }
         // Mayús: restringir al eje dominante
         if (ev.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
         updateLayer(id, { dx: round(d0[0] + dx), dy: round(d0[1] + dy) }, false);
       };
-      const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+      const up = () => { setDrag(null); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
+      window.addEventListener('pointercancel', up);
       return;
     }
     if (e.button === 0 && !id) select(null);
@@ -157,12 +173,17 @@ export function Canvas() {
   };
 
   const startPan = (e: React.PointerEvent) => {
+    // Sin esto el navegador inicia un arrastre nativo (imagen o selección) y muestra el cursor de "no se puede soltar".
+    e.preventDefault();
+    const active = document.activeElement as HTMLElement | null;
+    if (active?.matches('input, textarea, select')) active.blur();
     const p0 = [e.clientX, e.clientY], pan0 = useStore.getState().pan;
     setPanning(true);
     const move = (ev: PointerEvent) => set({ pan: [pan0[0] + ev.clientX - p0[0], pan0[1] + ev.clientY - p0[1]] });
-    const up = () => { setPanning(false); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    const up = () => { setPanning(false); window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
   };
 
   const dragNode = (e: React.PointerEvent<SVGElement>, node: CurveNode, grip?: Grip) => {
@@ -170,6 +191,7 @@ export function Canvas() {
     e.stopPropagation();
     const el = e.currentTarget;
     el.setPointerCapture(e.pointerId);
+    setDrag('node');
     const start = toImage(e.clientX, e.clientY);
     const offset: Vec = grip ? [start[0] - selected.dx - grip.pivot[0], start[1] - selected.dy - grip.pivot[1]] : [0, 0];
     const arm: Vec = grip ? [grip.tip[0] - grip.pivot[0], grip.tip[1] - grip.pivot[1]] : [0, 0];
@@ -195,6 +217,7 @@ export function Canvas() {
       }, false);
     };
     const end = () => {
+      setDrag(null);
       el.removeEventListener('pointermove', move);
       el.removeEventListener('lostpointercapture', end);
     };
@@ -232,6 +255,19 @@ export function Canvas() {
   };
   const isFileDrag = (e: React.DragEvent) => e.dataTransfer.types.includes('Files');
 
+  // Doble clic: sobre una pieza la aísla; en vacío sale del aislamiento.
+  // Ajustar la vista solo ocurre fuera de la imagen, para no perder el zoom al editar nodos.
+  const onDoubleClick = (e: React.MouseEvent) => {
+    if (!source) return;
+    const t = e.target as Element;
+    if (t.closest('.toolbar, .drawing-tools, .split-handle, .overlay-ui *')) return;
+    const id = view !== 'original' ? t.closest('[data-id]')?.getAttribute('data-id') : null;
+    const layer = id ? useStore.getState().layers.find((l) => l.id === id) : null;
+    if (isolatedId) { if (!layer || layer.id !== isolatedId) isolate(null); return; }
+    if (layer && layer.kind !== 'background') { isolate(layer.id); return; }
+    if (!t.closest('.stage')) useStore.getState().fit();
+  };
+
   const onContextMenu = (e: React.MouseEvent) => {
     const id = (e.target as Element).closest('[data-id]')?.getAttribute('data-id');
     if (!id || view === 'original') return;
@@ -251,7 +287,9 @@ export function Canvas() {
 
   const showVector = view !== 'original';
   const showImage = !!isolatedId || view !== 'vector';
-  const vectorClip = view === 'split' ? `inset(0 0 0 ${split * 100}%)` : undefined;
+  // Recorte del modo Comparar que no corta las piezas que salen por arriba, abajo o la derecha.
+  const splitX = split <= 0 ? '-1000%' : `${split * 100}%`;
+  const vectorClip = view === 'split' ? `polygon(${splitX} -1000%, 1000% -1000%, 1000% 1000%, ${splitX} 1000%)` : undefined;
   const wire = showOutlines;
 
   return (
@@ -260,9 +298,13 @@ export function Canvas() {
       className="canvas"
       data-panning={panning}
       data-space={spaceHeld}
+      data-drag={drag ?? undefined}
+      data-additive={additive && !isolatedId}
+      data-isolated={!!isolatedId}
       onPointerDown={onPointerDown}
       onContextMenu={onContextMenu}
-      onDoubleClick={(e) => { if (source && !(e.target as Element).closest('[data-id], .toolbar, .drawing-tools, .split-handle')) useStore.getState().fit(); }}
+      onDragStart={(e) => e.preventDefault()}
+      onDoubleClick={onDoubleClick}
       onDragOver={(e) => { if (isFileDrag(e)) { e.preventDefault(); setDropOver(true); } }}
       onDragLeave={(e) => { if (e.currentTarget === e.target) setDropOver(false); }}
       onDrop={onDrop}
@@ -290,13 +332,10 @@ export function Canvas() {
           {showImage && <img src={source.url} alt="Imagen original" draggable={false} style={{ opacity: isolatedId ? 0.4 : 1, imageRendering: s > 2 ? 'pixelated' : 'auto' }} />}
           {showVector && (
             <svg
+              ref={vectorSvg}
               className={`vector ${wire ? 'wire' : ''}`}
               viewBox={`0 0 ${iw} ${ih}`}
               style={{ clipPath: vectorClip, opacity: view === 'overlay' ? overlayOpacity : 1 }}
-              onDoubleClick={e => {
-                const id = (e.target as Element).getAttribute('data-id');
-                if (id) isolate(isolatedId === id ? null : id);
-              }}
               onPointerOver={(e) => setHover((e.target as Element).getAttribute('data-id'))}
               onPointerOut={() => setHover(null)}
               onPointerMove={onHoverMove}
@@ -309,6 +348,8 @@ export function Canvas() {
                 <path
                   key={l.id}
                   data-id={l.id}
+                  data-bg={l.kind === 'background' || undefined}
+                  data-selected={l.id === selectedId || additionalIds.includes(l.id) || undefined}
                   clipPath={!isolatedId && l.kind === 'clipped-circle' ? `url(#visible-${l.id})` : undefined}
                   d={dMap.get(l.id)}
                   fill={l.fill}
@@ -326,6 +367,7 @@ export function Canvas() {
             </svg>
           )}
           <svg className="overlay-ui" viewBox={`0 0 ${iw} ${ih}`}>
+            {offArtboard && <rect className="artboard-edge" width={iw} height={ih} />}
             {!isolatedId && showAxes && globalAxis && <AxisLine axis={globalAxis} w={iw} h={ih} global />}
             {!isolatedId && hover && hover !== selectedId && showVector && (() => {
               const l = layers.find((x) => x.id === hover);
@@ -360,6 +402,9 @@ export function Canvas() {
       )}
       {status === 'loading' && <div className="status-chip" role="status"><span className="dot" />Leyendo imagen…</div>}
       {error && <div className="error-banner" role="alert">{error}</div>}
+      {source && offArtboard && showVector && (
+        <div className="status-chip status-chip--warn" role="status">Parte de la pieza queda fuera de la imagen · se recorta al exportar</div>
+      )}
       {dropOver && source && <div className="drop-veil"><span>Suelta para reemplazar la imagen</span></div>}
       {source && view !== 'original' && (
         <div ref={tip} className="hover-tip" data-show={!!hovered && hovered.id !== selectedId && !isolatedId} aria-hidden>
@@ -407,7 +452,7 @@ function Nodes({ shape, scale, onDrag, onDelete }: { onDelete?: (node: CurveNode
   const edges: { a: Vec; b: Vec; from: CurveNode; to: CurveNode }[] = [];
   const anchorNodes: CurveNode[] = [], handleNodes: CurveNode[] = [];
   const events = (node?: CurveNode) => onDrag && node ? {
-    style: { pointerEvents: 'all' as const, cursor: 'grab' },
+    style: { pointerEvents: 'all' as const },
     onPointerDown: (e: React.PointerEvent<SVGElement>) => onDrag(e, node),
   } : {};
   switch (shape.type) {
