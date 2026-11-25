@@ -100,12 +100,12 @@ export function intersectLines(p1: Vec, d1: Vec, p2: Vec, d2: Vec): Vec | null {
 
 // ───────────────────────── Ajuste de Bézier (Schneider, Graphics Gems 1990) ─────────────────────────
 
-function bez(c: Vec[], t: number): Vec {
+export function bez(c: Vec[], t: number): Vec {
   const mt = 1 - t;
   const a = mt * mt * mt, b = 3 * mt * mt * t, cc = 3 * mt * t * t, d = t * t * t;
   return [a * c[0][0] + b * c[1][0] + cc * c[2][0] + d * c[3][0], a * c[0][1] + b * c[1][1] + cc * c[2][1] + d * c[3][1]];
 }
-function bezD1(c: Vec[], t: number): Vec {
+export function bezD1(c: Vec[], t: number): Vec {
   const mt = 1 - t;
   return [
     3 * (mt * mt * (c[1][0] - c[0][0]) + 2 * mt * t * (c[2][0] - c[1][0]) + t * t * (c[3][0] - c[2][0])),
