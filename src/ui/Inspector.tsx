@@ -103,7 +103,7 @@ function LayerInspector() {
   const { updateLayer, moveLayer, deleteLayer, isolate, beginEdit } = useStore.getState();
   if (!layer) return <p className="panel__empty">Selecciona una capa en la lista o en el lienzo para editarla.</p>;
 
-  if (additionalIds.length) return <section className="section"><h3 className="section__title">{additionalIds.length + 1} capas seleccionadas</h3><Button disabled={!canJoin} onClick={useStore.getState().joinSelected}>Unir trazos</Button><p className="t-body-sm">{canJoin ? 'Se conserva el estilo y la posición en la pila del primer trazo. Los extremos cercanos se conectan.' : 'Selecciona solo capas de trazo para unirlas.'}</p></section>;
+  if (additionalIds.length) return <section className="section"><h3 className="section__title">{additionalIds.length + 1} capas seleccionadas</h3><Button disabled={!canJoin} onClick={useStore.getState().joinSelected}>Unir trazos</Button><p className="t-body-sm">{canJoin ? 'La unión sigue la tinta de la imagen original y conserva el estilo del primer trazo.' : 'Selecciona solo capas de trazo para unirlas.'}</p></section>;
 
   const isBg = layer.kind === 'background';
   const usingRecognized = layer.shape === layer.recognized || (layer.shape.type !== 'path' && layer.shape.type !== 'strokes');

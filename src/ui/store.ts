@@ -214,14 +214,15 @@ export const useStore = create<State>((set, get) => {
       set({ selectedId: pieces[0].id, additionalIds: [], isolatedId: !original && isolatedId ? pieces[0].id : null, view: 'vector' });
     },
     joinSelected() {
-      const { layers, selectedId, additionalIds } = get();
+      const { layers, selectedId, additionalIds, source } = get();
       const ids = new Set([selectedId, ...additionalIds]);
       const members = layers.filter(l => ids.has(l.id));
       const primary = members.find(l => l.id === selectedId);
-      if (!primary || members.length < 2 || members.some(l => l.shape.type !== 'strokes' || !l.stroke)) return;
-      const joined = joinStrokes(primary, members);
+      if (!source || !primary || members.length < 2 || members.some(l => l.shape.type !== 'strokes' || !l.stroke)) return;
+      const { layer: joined, connections } = joinStrokes(primary, members, source.raster);
       commit(layers.filter(l => !ids.has(l.id) || l.id === primary.id).map(l => l.id === primary.id ? joined : l));
       set({ additionalIds: [] });
+      get().toast(connections ? `Conexiones realizadas: ${connections}` : 'Trazos agrupados. La imagen no muestra una conexión clara.');
     },
 
     beginEdit() {
