@@ -1,6 +1,21 @@
 import { useStore, type ViewMode } from '../store';
 import { download, sampleFile } from './sample';
 
+import { projectExtension, serializeProject } from './project';
+
+export async function saveProject() {
+  const { source, status, layers, palette, params, globalAxis, toast } = st();
+  if (!source || status !== 'done') return;
+  try {
+    const text = await serializeProject(source, { layers, palette, params, globalAxis });
+    const name = (source.name.replace(/\.[^.]+$/, '') || 'proyecto') + projectExtension;
+    download(text, name, 'application/json');
+    toast(`Proyecto descargado: ${name}`);
+  } catch {
+    toast('No se pudo guardar el proyecto.');
+  }
+}
+
 const st = () => useStore.getState();
 
 export function exportFile() {

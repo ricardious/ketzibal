@@ -1,8 +1,8 @@
-import { Copy, Download, ImageUp, Keyboard, Layers, Moon, Redo2, SlidersHorizontal, Sun, SunMoon, Undo2 } from 'lucide-react';
+import { Copy, Download, Save, ImageUp, Keyboard, Layers, Moon, Redo2, SlidersHorizontal, Sun, SunMoon, Undo2 } from 'lucide-react';
 import { useRef } from 'react';
 import { Button, IconButton } from './components/Button';
-import { ACCEPTED } from './lib/image';
-import { copySvg, exportFile } from './lib/actions';
+import { fileFilter } from './lib/project';
+import { copySvg, exportFile, saveProject } from './lib/actions';
 import { MOD } from './lib/shortcuts';
 import { HOME_URL } from '../shared/handoff';
 import { useStore, type Theme } from './store';
@@ -52,7 +52,7 @@ export function TopBar() {
         ref={input}
         id="file-import"
         type="file"
-        accept={ACCEPTED.join(',')}
+        accept={fileFilter}
         hidden
         onChange={(e) => {
           const f = e.target.files?.[0];
@@ -60,8 +60,11 @@ export function TopBar() {
           e.target.value = '';
         }}
       />
-      <Button className="collapse-label" icon={<ImageUp />} onClick={() => input.current?.click()} aria-label="Importar imagen" title={`Importar imagen (${MOD}+O)`}>
-        <span className="label">Importar imagen</span>
+      <Button className="collapse-label" icon={<ImageUp />} onClick={() => input.current?.click()} aria-label="Abrir imagen o proyecto" title={`Abrir imagen o proyecto (${MOD}+O)`}>
+        <span className="label">Abrir</span>
+      </Button>
+      <Button className="collapse-label" icon={<Save />} disabled={status !== 'done'} onClick={() => void saveProject()} aria-label="Guardar proyecto" title={`Guardar proyecto (${MOD}+S)`}>
+        <span className="label">Guardar proyecto</span>
       </Button>
       <div className="split-btn">
         <Button className="collapse-label" variant="primary" icon={<Download />} disabled={!canExport} onClick={exportFile} aria-label="Exportar SVG" title={`Exportar SVG (${MOD}+E)`}>

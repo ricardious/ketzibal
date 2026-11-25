@@ -114,7 +114,7 @@ function LayerInspector() {
       <section className="section">
         {!isBg && <Button size="sm" variant="outline" icon={<Focus />} onClick={() => isolate(isolatedId ? null : layer.id)}>{isolatedId ? 'Salir del aislamiento' : 'Editar en aislamiento'}</Button>}
         {!isBg && <FigurePicker action="replace" />}
-        {isolatedId && <p className="t-body-sm">Arrastra un nodo para moverlo. En trazos, curvas y polígonos, selecciona un nodo cuadrado y pulsa Supr o Retroceso para borrarlo.</p>}
+        {isolatedId && <p className="t-body-sm">Arrastra una recta cerca del extremo que quieras mover. En una curva, arrastra la línea del manejador para alargarla, acortarla o girarla. En trazos, curvas y polígonos, selecciona un nodo cuadrado y pulsa Supr o Retroceso para borrarlo.</p>}
         {layer.kind === 'stroke' && !isolatedId && <p className="t-body-sm">Usa Mayús + clic para seleccionar otro trazo y unirlos.</p>}
         <div className="field">
           <label className="field__label" htmlFor="ly-name">Nombre</label>

@@ -7,6 +7,7 @@ import { Button, IconButton } from './components/Button';
 import { Slider } from './components/Slider';
 import { Tabs } from './components/Tabs';
 import { moveNode, removeNode, type CurveNode } from './lib/edit-node';
+import { fileFilter, isProject } from './lib/project';
 import { ACCEPTED } from './lib/image';
 import { loadSample, zoomBy } from './lib/actions';
 import { MOD } from './lib/shortcuts';
@@ -21,6 +22,11 @@ const MODES = [
 
 export function layerD(l: Layer) {
   return [l.shape, ...l.holes].map((s) => shapeToD(s, 2)).join('');
+}
+
+interface Grip {
+  pivot: Vec;
+  tip: Vec;
 }
 
 export function Canvas() {
@@ -159,18 +165,26 @@ export function Canvas() {
     window.addEventListener('pointerup', up);
   };
 
-  const dragNode = (e: React.PointerEvent<SVGElement>, node: CurveNode) => {
-    if (!selected || !isolatedId || e.button !== 0) return;
+  const dragNode = (e: React.PointerEvent<SVGElement>, node: CurveNode, grip?: Grip) => {
+    if (!selected || !isolatedId || spaceHeld || e.button !== 0) return;
     e.stopPropagation();
     const el = e.currentTarget;
     el.setPointerCapture(e.pointerId);
     const start = toImage(e.clientX, e.clientY);
+    const offset: Vec = grip ? [start[0] - selected.dx - grip.pivot[0], start[1] - selected.dy - grip.pivot[1]] : [0, 0];
+    const arm: Vec = grip ? [grip.tip[0] - grip.pivot[0], grip.tip[1] - grip.pivot[1]] : [0, 0];
+    const fraction = Math.max(0.5, Math.min(1, (offset[0] * arm[0] + offset[1] * arm[1]) / (arm[0] ** 2 + arm[1] ** 2 || 1)));
     let moved = false;
     const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== e.pointerId) return;
       const now = toImage(ev.clientX, ev.clientY);
       const delta: Vec = [now[0] - start[0], now[1] - start[1]];
       if (!moved && Math.hypot(...delta) * s < 1) return;
       if (!moved) { beginEdit(); moved = true; }
+      if (grip) {
+        delta[0] /= fraction;
+        delta[1] /= fraction;
+      }
       const shape = moveNode(selected.shape, node, delta);
       const primitive = shape.type !== 'path' && shape.type !== 'strokes';
       const kind = selected.kind === 'square' && shape.type === 'rect' && Math.abs(shape.w - shape.h) > 0.01 ? 'rect' : selected.kind;
@@ -213,7 +227,7 @@ export function Canvas() {
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDropOver(false);
-    const f = [...e.dataTransfer.files].find((x) => ACCEPTED.includes(x.type));
+    const f = [...e.dataTransfer.files].find((x) => isProject(x) || ACCEPTED.includes(x.type));
     if (f) void loadFile(f);
   };
   const isFileDrag = (e: React.DragEvent) => e.dataTransfer.types.includes('Files');
@@ -261,7 +275,7 @@ export function Canvas() {
             <h1 className="t-headline-lg">{dropOver ? 'Suelta para vectorizar' : 'Trae una imagen'}</h1>
             <p className="t-body-md">PNG, JPG o WebP. Cada figura se convierte en una capa SVG que puedes mover, recolorear y editar.</p>
             <div className="dropzone__actions">
-              <input ref={fileInput} type="file" accept={ACCEPTED.join(',')} hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) void loadFile(f); e.target.value = ''; }} />
+              <input ref={fileInput} type="file" accept={fileFilter} hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) void loadFile(f); e.target.value = ''; }} />
               <Button variant="primary" icon={<ImageUp />} onClick={() => fileInput.current?.click()}>Elegir archivo</Button>
               <Button variant="outline" icon={<Sparkles />} onClick={() => void loadSample()}>Probar con el ejemplo</Button>
             </div>
@@ -386,10 +400,11 @@ function AxisLine({ axis, w, h, global }: { axis: SymmetryAxis; w: number; h: nu
 }
 
 /** Nodos de la forma seleccionada (y manejadores de Bézier). */
-function Nodes({ shape, scale, onDrag, onDelete }: { onDelete?: (node: CurveNode) => void; shape: Shape; scale: number; onDrag?: (e: React.PointerEvent<SVGElement>, node: CurveNode) => void }) {
+function Nodes({ shape, scale, onDrag, onDelete }: { onDelete?: (node: CurveNode) => void; shape: Shape; scale: number; onDrag?: (e: React.PointerEvent<SVGElement>, node: CurveNode, grip?: Grip) => void }) {
   const r = 3.5 / scale;
   const anchors: Vec[] = [];
   const handles: [Vec, Vec][] = [];
+  const edges: { a: Vec; b: Vec; from: CurveNode; to: CurveNode }[] = [];
   const anchorNodes: CurveNode[] = [], handleNodes: CurveNode[] = [];
   const events = (node?: CurveNode) => onDrag && node ? {
     style: { pointerEvents: 'all' as const, cursor: 'grab' },
@@ -413,6 +428,10 @@ function Nodes({ shape, scale, onDrag, onDelete }: { onDelete?: (node: CurveNode
     case 'polygon':
       anchors.push(...shape.points);
       shape.points.forEach((_, segment) => anchorNodes.push({ loop: 0, segment, point: 'p' }));
+      shape.points.forEach((a, i) => {
+        const next = (i + 1) % anchors.length;
+        edges.push({ a, b: anchors[next], from: anchorNodes[i], to: anchorNodes[next] });
+      });
       break;
     case 'path':
     case 'strokes': {
@@ -421,13 +440,18 @@ function Nodes({ shape, scale, onDrag, onDelete }: { onDelete?: (node: CurveNode
         anchors.push(prev);
         anchorNodes.push({ loop: index, segment: -1, point: 'start' });
         for (const [segment, g] of loop.segs.entries()) {
-          if (!g.line) {
+          if (g.line) {
+            edges.push({ a: prev, b: g.p, from: anchorNodes[anchorNodes.length - 1], to: { loop: index, segment, point: 'p' } });
+          } else {
             handles.push([prev, g.c1], [g.p, g.c2]);
             handleNodes.push({ loop: index, segment, point: 'c1' }, { loop: index, segment, point: 'c2' });
           }
           anchorNodes.push({ loop: index, segment, point: 'p' });
           anchors.push(g.p);
           prev = g.p;
+        }
+        if ((shape.type === 'path' || shape.paths[index].closed) && (prev[0] !== loop.start[0] || prev[1] !== loop.start[1])) {
+          edges.push({ a: prev, b: loop.start, from: anchorNodes[anchorNodes.length - 1], to: { loop: index, segment: -1, point: 'start' } });
         }
       }
     }
@@ -438,8 +462,21 @@ function Nodes({ shape, scale, onDrag, onDelete }: { onDelete?: (node: CurveNode
   const editable = !!onDelete && (shape.type === 'strokes' || shape.type === 'path' || shape.type === 'polygon');
   return (
     <g>
+      {onDrag && edges.map(({ a, b, from, to }, i) => (
+        <line key={`edge${i}`} className="edit-grip" x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]}
+          onPointerDown={e => {
+            const line = e.currentTarget, matrix = line.getScreenCTM();
+            if (!matrix) return;
+            const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(matrix.inverse());
+            const nearerA = Math.hypot(p.x - a[0], p.y - a[1]) < Math.hypot(p.x - b[0], p.y - b[1]);
+            onDrag(e, nearerA ? from : to, { pivot: nearerA ? b : a, tip: nearerA ? a : b });
+          }} />
+      ))}
+      {onDrag && handles.map(([pivot, tip], i) => <line key={`arm${i}`} className="edit-grip"
+        x1={pivot[0]} y1={pivot[1]} x2={tip[0]} y2={tip[1]}
+        onPointerDown={e => onDrag(e, handleNodes[i], { pivot, tip })} />)}
       {handles.map(([a, b], i) => <line key={`l${i}`} className="ctrl-line" x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} />)}
-      {handles.map(([, b], i) => <circle {...events(handleNodes[i])} key={`h${i}`} className="node--ctrl" cx={b[0]} cy={b[1]} r={r * 0.6} />)}
+      {handles.map(([, b], i) => <circle {...events(handleNodes[i])} key={`h${i}`} className="node--ctrl" cx={b[0]} cy={b[1]} r={r * 1.05} />)}
       {anchors.map((p, i) => <rect {...events(anchorNodes[i])} key={i} className="node" tabIndex={editable ? 0 : undefined}
         aria-label={editable ? `Nodo ${i + 1}` : undefined}
         onPointerDown={onDrag ? e => {

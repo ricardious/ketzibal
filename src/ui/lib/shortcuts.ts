@@ -6,8 +6,9 @@ export const SHORTCUT_GROUPS: { title: string; items: [string[], string][] }[] =
   {
     title: 'Archivo',
     items: [
-      [[MOD, 'O'], 'Importar imagen'],
+      [[MOD, 'O'], 'Abrir imagen o proyecto'],
       [[MOD, 'V'], 'Pegar imagen'],
+      [[MOD, 'S'], 'Guardar proyecto'],
       [[MOD, 'E'], 'Exportar SVG'],
       [[MOD, 'Mayús', 'C'], 'Copiar SVG'],
     ],
