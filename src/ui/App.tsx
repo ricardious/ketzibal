@@ -6,6 +6,7 @@ import { Inspector } from './Inspector';
 import { LayersPanel } from './LayersPanel';
 import { ShortcutsDialog } from './ShortcutsDialog';
 import { Toasts } from './Toasts';
+import { Tooltips } from './components/Tooltip';
 import { TopBar } from './TopBar';
 import { copySvg, exportFile, saveProject, loadSample, pickFile, VIEW_KEYS, zoomBy } from './lib/actions';
 import { ACCEPTED } from './lib/image';
@@ -104,6 +105,7 @@ export function App() {
       <ContextMenu />
       <ShortcutsDialog />
       <Toasts />
+      <Tooltips />
     </div>
   );
 }
