@@ -48,6 +48,7 @@ export const SHORTCUT_GROUPS: { title: string; items: [string[], string][] }[] =
       [['Clic'], 'Seleccionar'],
       [['Mayús', 'Clic'], 'Añadir a la selección'],
       [['Doble clic'], 'Editar nodos en aislamiento'],
+      [['Doble clic en vacío'], 'Salir del aislamiento'],
       [['Clic derecho'], 'Más acciones'],
       [['↑', '↓', '←', '→'], 'Mover 1 px (Mayús: 10 px)'],
       [[MOD, 'D'], 'Duplicar'],

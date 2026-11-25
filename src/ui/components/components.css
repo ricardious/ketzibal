@@ -165,3 +165,23 @@
 @keyframes mselect-in { from { opacity: 0; transform: translateY(-4px); } }
 @keyframes mselect-in-up { from { opacity: 0; transform: translateY(calc(-100% + 4px)); } }
 @media (prefers-reduced-motion: reduce) { .mselect__list { animation: none; } }
+
+/* ── Tooltip ────────────────────────────────────────── */
+.tooltip {
+  position: fixed; left: 0; top: 0; z-index: 70; pointer-events: none;
+  display: flex; align-items: center; gap: 8px; max-width: 280px;
+  padding: 5px 8px 5px 10px; border-radius: var(--rounded-sm);
+  background: var(--inverse-surface); color: var(--inverse-on-surface);
+  font: 500 12px/16px var(--font-sans);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.18);
+  opacity: 0; transition: opacity 120ms var(--ease-state);
+}
+.tooltip[data-show='true'] { opacity: 1; }
+.tooltip__keys { display: inline-flex; gap: 3px; flex: none; }
+.tooltip kbd {
+  min-width: 18px; height: 18px; padding: 0 4px; border-radius: 4px; border: 0;
+  background: color-mix(in oklab, var(--inverse-on-surface) 16%, transparent);
+  color: inherit; font: 600 11px/1 var(--font-sans);
+}
+@media (hover: none) { .tooltip { display: none; } }
+@media (prefers-reduced-motion: reduce) { .tooltip { transition: none; } }

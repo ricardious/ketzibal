@@ -4,14 +4,32 @@
  */
 const DB = 'ketzibal', STORE = 'handoff', KEY = 'pending';
 
-function open(): Promise<IDBDatabase> {
+/**
+ * Abre una base de datos asegurando que exista `store`. Si la base ya existía sin ese almacén
+ * (p. ej. creada por otra versión de la app), la sube de versión para crearlo.
+ */
+export function openStore(name: string, store: string, options?: IDBObjectStoreParameters,
+  setup?: (s: IDBObjectStore) => void, version?: number): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-    req.onsuccess = () => resolve(req.result);
+    const req = version ? indexedDB.open(name, version) : indexedDB.open(name);
+    req.onupgradeneeded = () => {
+      if (req.result.objectStoreNames.contains(store)) return;
+      const s = req.result.createObjectStore(store, options);
+      setup?.(s);
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      if (db.objectStoreNames.contains(store)) return resolve(db);
+      const next = db.version + 1;
+      db.close();
+      openStore(name, store, options, setup, next).then(resolve, reject);
+    };
     req.onerror = () => reject(req.error);
+    req.onblocked = () => reject(new Error('Cierra las otras pestañas de Ketzibal e inténtalo de nuevo.'));
   });
 }
+
+const open = () => openStore(DB, STORE);
 
 function tx<T>(mode: IDBTransactionMode, run: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   return open().then((db) => new Promise<T>((resolve, reject) => {
