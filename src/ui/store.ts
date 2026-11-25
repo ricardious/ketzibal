@@ -5,6 +5,7 @@ import { create } from 'zustand';
 import { CancelledError, DEFAULT_PARAMS, toSvg, Vectorizer, type Layer, type Progress, type SymmetryAxis, type VectorizeParams } from '../engine';
 import { loadImageFile, type SourceImage } from './lib/image';
 import { measureAccuracy } from './lib/accuracy';
+import { deleteProject, getProject, listProjects, newProjectId, renameProject, restoreProject, type ProjectSummary } from './lib/library';
 
 export type ViewMode = 'split' | 'original' | 'vector' | 'overlay';
 export type Theme = 'system' | 'light' | 'dark';
@@ -45,7 +46,18 @@ interface State {
   shortcutsOpen: boolean;
   menu: { x: number; y: number; id: string } | null;
 
+  /** Proyecto de la biblioteca del navegador que está abierto. */
+  projectId: string | null;
+  projects: ProjectSummary[];
+  projectsOpen: boolean;
+  saveState: 'idle' | 'saving' | 'saved' | 'error';
+
   loadFile: (f: File) => Promise<void>;
+  openProject: (id: string) => Promise<void>;
+  newProject: () => void;
+  refreshProjects: () => Promise<void>;
+  renameProject: (id: string, name: string) => Promise<void>;
+  removeProject: (id: string) => Promise<void>;
   setParam: <K extends keyof VectorizeParams>(k: K, v: VectorizeParams[K]) => void;
   resetParams: () => void;
   run: () => Promise<void>;
@@ -129,6 +141,10 @@ export const useStore = create<State>((set, get) => {
     toasts: [],
     shortcutsOpen: false,
     menu: null,
+    projectId: null,
+    projects: [],
+    projectsOpen: false,
+    saveState: 'idle',
 
     async loadFile(file) {
       const sequence = ++loadSequence;
@@ -141,7 +157,7 @@ export const useStore = create<State>((set, get) => {
         if (sequence !== loadSequence) { URL.revokeObjectURL(src.url); return; }
         const old = get().source;
         if (old) URL.revokeObjectURL(old.url);
-        set({ source: src, layers: [], past: [], future: [], selectedId: null, additionalIds: [], isolatedId: null, accuracy: null, zoom: 1, pan: [0, 0] });
+        set({ source: src, projectId: newProjectId(), saveState: 'idle', layers: [], past: [], future: [], selectedId: null, additionalIds: [], isolatedId: null, accuracy: null, zoom: 1, pan: [0, 0] });
         if (project) {
           set({ ...project, status: 'done', progress: null, stats: null, contours: '', view: 'vector', hoverId: null, menu: null });
           scheduleAccuracy();
@@ -152,6 +168,74 @@ export const useStore = create<State>((set, get) => {
         if (get().source) { set({ status: 'done' }); get().toast(error); }
         else { set({ status: 'error', error }); get().toast(error); }
       }
+    },
+
+    async openProject(id) {
+      if (id === get().projectId) { set({ projectsOpen: false }); return; }
+      const sequence = ++loadSequence;
+      clearTimeout(paramTimer);
+      vectorizer.cancel();
+      set({ status: 'loading', error: null, projectsOpen: false });
+      try {
+        const p = await getProject(id);
+        if (!p) throw new Error('Ese proyecto ya no está en este navegador.');
+        const src = await loadImageFile(new File([p.image], p.name, { type: p.image.type }));
+        src.name = p.name;
+        if (sequence !== loadSequence) { URL.revokeObjectURL(src.url); return; }
+        const old = get().source;
+        if (old) URL.revokeObjectURL(old.url);
+        set({
+          source: src, projectId: id, saveState: 'saved',
+          layers: p.layers, params: { ...DEFAULT_PARAMS, ...p.params }, palette: p.palette, globalAxis: p.globalAxis,
+          past: [], future: [], selectedId: null, additionalIds: [], isolatedId: null, accuracy: null, zoom: 1, pan: [0, 0],
+          status: 'done', progress: null, stats: null, contours: '', view: 'vector', hoverId: null, menu: null,
+        });
+        scheduleAccuracy();
+      } catch (e) {
+        if (sequence !== loadSequence) return;
+        set({ status: get().source ? 'done' : 'idle' });
+        get().toast(e instanceof Error ? e.message : String(e));
+        void get().refreshProjects();
+      }
+    },
+
+    newProject() {
+      ++loadSequence;
+      clearTimeout(paramTimer);
+      vectorizer.cancel();
+      const old = get().source;
+      if (old) URL.revokeObjectURL(old.url);
+      set({
+        source: null, projectId: null, saveState: 'idle', status: 'idle', error: null, progress: null, contours: '',
+        layers: [], palette: [], globalAxis: null, stats: null, accuracy: null, params: { ...DEFAULT_PARAMS },
+        past: [], future: [], selectedId: null, additionalIds: [], isolatedId: null, hoverId: null, menu: null,
+        zoom: 1, pan: [0, 0], projectsOpen: false,
+      });
+      void get().refreshProjects();
+    },
+
+    async refreshProjects() {
+      try { set({ projects: await listProjects() }); } catch { /* sin almacenamiento: la lista queda vacía */ }
+    },
+
+    async renameProject(id, name) {
+      name = name.trim();
+      if (!name) return;
+      set({ projects: get().projects.map((p) => (p.id === id ? { ...p, name } : p)) });
+      const src = get().source;
+      if (id === get().projectId && src) set({ source: { ...src, name } });
+      try { await renameProject(id, name); } catch { get().toast('No se pudo cambiar el nombre.'); }
+    },
+
+    async removeProject(id) {
+      const record = await getProject(id).catch(() => undefined);
+      try { await deleteProject(id); } catch { get().toast('No se pudo eliminar el proyecto.'); return; }
+      if (id === get().projectId) get().newProject();
+      set({ projects: get().projects.filter((p) => p.id !== id) });
+      if (record) get().toast(`«${record.name}» eliminado`, {
+        label: 'Deshacer',
+        run: () => void restoreProject(record).then(() => get().refreshProjects()),
+      });
     },
 
     setParam(k, v) {

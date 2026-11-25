@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { shapeArea } from '../engine/shapes';
 import { KIND_NAMES, nodeCount, shapeToD, type Layer, type Shape, type SymmetryAxis, type Vec } from '../engine';
 import { DrawingTools } from './DrawingTools';
+import { RecentProjects } from './Projects';
 import { Button, IconButton } from './components/Button';
 import { Slider } from './components/Slider';
 import { Tabs } from './components/Tabs';
@@ -323,6 +324,7 @@ export function Canvas() {
             </div>
             <span className="dropzone__hint">Arrastra el archivo aquí o pégalo con <kbd>{MOD}</kbd> <kbd>V</kbd>. La imagen no sale de tu navegador.</span>
           </div>
+          <RecentProjects />
         </div>
       )}
 

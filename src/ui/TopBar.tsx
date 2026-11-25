@@ -1,4 +1,4 @@
-import { Copy, Download, Save, ImageUp, Keyboard, Layers, Moon, Redo2, SlidersHorizontal, Sun, SunMoon, Undo2 } from 'lucide-react';
+import { Check, CloudAlert, Copy, Download, FolderOpen, LoaderCircle, Save, ImageUp, Keyboard, Layers, Moon, Redo2, SlidersHorizontal, Sun, SunMoon, Undo2 } from 'lucide-react';
 import { useRef } from 'react';
 import { Button, IconButton } from './components/Button';
 import { fileFilter } from './lib/project';
@@ -20,6 +20,8 @@ export function TopBar() {
   const hasLayers = useStore((s) => s.layers.length > 0);
   const theme = useStore((s) => s.theme);
   const panel = useStore((s) => s.panel);
+  const saveState = useStore((s) => s.saveState);
+  const projectCount = useStore((s) => s.projects.length);
   const { loadFile, undo, redo, set } = useStore.getState();
   const canExport = hasLayers && status !== 'processing';
 
@@ -37,7 +39,14 @@ export function TopBar() {
       {source && (
         <div className="topbar__file">
           <b title={source.name}>{source.name}</b>
-          <span className="t-mono-sm">{source.width}×{source.height}</span>
+          <span className="t-mono-sm hide-compact">{source.width}×{source.height}</span>
+          {saveState !== 'idle' && (
+            <span className="topbar__saved" data-state={saveState} role="status"
+              title={saveState === 'error' ? 'No se pudo guardar en el navegador' : 'Se guarda automáticamente en este navegador'}>
+              {saveState === 'saving' ? <LoaderCircle /> : saveState === 'error' ? <CloudAlert /> : <Check />}
+              <span className="hide-compact">{saveState === 'saving' ? 'Guardando…' : saveState === 'error' ? 'Sin guardar' : 'Guardado'}</span>
+            </span>
+          )}
         </div>
       )}
       <div className="topbar__spacer" />
@@ -60,10 +69,14 @@ export function TopBar() {
           e.target.value = '';
         }}
       />
+      <Button className="collapse-label" icon={<FolderOpen />} onClick={() => set({ projectsOpen: true })} aria-label="Proyectos"
+        title={projectCount ? `Proyectos guardados en este navegador: ${projectCount}` : 'Proyectos guardados en este navegador'}>
+        <span className="label">Proyectos</span>
+      </Button>
       <Button className="collapse-label" icon={<ImageUp />} onClick={() => input.current?.click()} aria-label="Abrir imagen o proyecto" title={`Abrir imagen o proyecto (${MOD}+O)`}>
         <span className="label">Abrir</span>
       </Button>
-      <Button className="collapse-label" icon={<Save />} disabled={status !== 'done'} onClick={() => void saveProject()} aria-label="Guardar proyecto" title={`Guardar proyecto (${MOD}+S)`}>
+      <Button className="collapse-label" icon={<Save />} disabled={status !== 'done'} onClick={() => void saveProject()} aria-label="Guardar proyecto" title={`Descargar el proyecto como archivo .ketzibal (${MOD}+S)`}>
         <span className="label">Guardar proyecto</span>
       </Button>
       <div className="split-btn">

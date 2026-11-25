@@ -7,6 +7,8 @@ import { LayersPanel } from './LayersPanel';
 import { ShortcutsDialog } from './ShortcutsDialog';
 import { Toasts } from './Toasts';
 import { Tooltips } from './components/Tooltip';
+import { ProjectsDialog } from './Projects';
+import { startAutosave } from './lib/autosave';
 import { TopBar } from './TopBar';
 import { copySvg, exportFile, saveProject, loadSample, pickFile, VIEW_KEYS, zoomBy } from './lib/actions';
 import { ACCEPTED } from './lib/image';
@@ -24,6 +26,8 @@ export function App() {
     else root.setAttribute('data-theme', theme);
     try { localStorage.setItem('ketzibal-theme', theme); } catch { /* almacenamiento no disponible */ }
   }, [theme]);
+
+  useEffect(() => startAutosave(), []);
 
   // Imagen traída desde la página de presentación, o ?ejemplo para cargar la muestra.
   useEffect(() => {
@@ -53,7 +57,7 @@ export function App() {
       if (mod && e.shiftKey && k === 'c') { e.preventDefault(); void copySvg(); return; }
       if (e.key === '?' ) { e.preventDefault(); st.set({ shortcutsOpen: !st.shortcutsOpen }); return; }
       if (e.key === 'Escape') {
-        if (st.menu || st.shortcutsOpen) { st.set({ menu: null, shortcutsOpen: false }); return; }
+        if (st.menu || st.shortcutsOpen || st.projectsOpen) { st.set({ menu: null, shortcutsOpen: false, projectsOpen: false }); return; }
         st.select(null); st.isolate(null); st.set({ panel: null }); return;
       }
       if (st.source && !mod && !e.altKey) {
@@ -104,6 +108,7 @@ export function App() {
       {panel && <div className="scrim" onClick={() => useStore.getState().set({ panel: null })} />}
       <ContextMenu />
       <ShortcutsDialog />
+      <ProjectsDialog />
       <Toasts />
       <Tooltips />
     </div>
