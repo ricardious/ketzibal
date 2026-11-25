@@ -35,6 +35,7 @@ export const SHORTCUT_GROUPS: { title: string; items: [string[], string][] }[] =
       [['T'], 'Triángulo'],
       [['L'], 'Línea'],
       [['P'], 'Forma libre'],
+      [['B'], 'Pluma Bézier'],
       [['K'], 'Dividir la capa seleccionada'],
       [['Mayús'], 'Al dibujar: proporciones iguales'],
       [['Alt'], 'Al dibujar: desde el centro'],

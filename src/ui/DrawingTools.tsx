@@ -1,14 +1,15 @@
-import { MousePointer2, Pencil, Scissors } from 'lucide-react';
+import { MousePointer2, Pencil, PenTool, Scissors } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { fitClosed, smoothClosed } from '../engine/curve';
 import { shapeToD, type Layer, type Shape, type Vec } from '../engine';
 import { polygonArea } from '../engine/vec';
 import { FIGURE_ICONS } from './lib/figure-icons';
 import { drawFigure, type FigureType } from './lib/figures';
+import { PenSurface } from './PenSurface';
 import { IconButton } from './components/Button';
 import { useStore } from './store';
 
-type Tool = FigureType | 'free' | 'cut' | '';
+type Tool = FigureType | 'free' | 'cut' | 'pen' | '';
 
 const TOOLS: { tool: Tool; label: string; key?: string; icon: ReactNode }[] = [
   { tool: '', label: 'Seleccionar y mover', key: 'V', icon: <MousePointer2 /> },
@@ -18,10 +19,12 @@ const TOOLS: { tool: Tool; label: string; key?: string; icon: ReactNode }[] = [
   { tool: 'triangle', label: 'Triángulo', key: 'T', icon: FIGURE_ICONS.triangle },
   { tool: 'semicircle', label: 'Semicírculo', icon: FIGURE_ICONS.semicircle },
   { tool: 'line', label: 'Línea', key: 'L', icon: FIGURE_ICONS.line },
+  { tool: 'pen', label: 'Pluma Bézier', key: 'B', icon: <PenTool /> },
   { tool: 'free', label: 'Forma libre', key: 'P', icon: <Pencil /> },
 ];
 
 const HINTS: Record<string, string> = {
+  pen: 'Clic para esquinas, arrastra para curvas. Clic en el primer nodo para cerrar o Enter para terminar abierto. Mayús ajusta a 45°.',
   cut: 'Arrastra una recta a través de la pieza seleccionada. Mayús fija el ángulo en pasos de 45°.',
   free: 'Dibuja el contorno sin soltar; al soltar se cierra y se suaviza.',
   line: 'Arrastra para trazar la línea. Mayús fija el ángulo en pasos de 45°.',
@@ -57,7 +60,7 @@ export function DrawingTools({ selected, scale, tx, ty }: { selected: Layer | nu
 
   // Atajos de herramienta y modificadores en vivo mientras se arrastra.
   useEffect(() => {
-    const keys: Record<string, Tool> = { v: '', c: 'circle', r: 'rect', t: 'triangle', l: 'line', p: 'free' };
+    const keys: Record<string, Tool> = { v: '', c: 'circle', r: 'rect', t: 'triangle', l: 'line', p: 'free', b: 'pen' };
     const down = (e: KeyboardEvent) => {
       setMods({ shift: e.shiftKey, alt: e.altKey });
       if (e.ctrlKey || e.metaKey || e.altKey || busy) return;
@@ -102,12 +105,12 @@ export function DrawingTools({ selected, scale, tx, ty }: { selected: Layer | nu
       const shape: Shape = { type: 'path', loop };
       const layer = drawFigure('rect', path[0], rawEnd);
       applyDrawing([{ ...layer, kind: 'path', name: 'Forma libre', shape, freeform: shape, area }]);
-    } else if (tool && tool !== 'cut') applyDrawing([drawFigure(tool, start, end)]);
+    } else if (tool && tool !== 'cut' && tool !== 'pen') applyDrawing([drawFigure(tool, start, end)]);
     reset();
   };
 
   const [first, last] = points.length >= 2 && tool !== 'free' ? constrain(tool, points[0], points[points.length - 1], mods.shift, mods.alt) : [points[0], points[points.length - 1]];
-  const preview = points.length < 2 || !tool ? '' : tool === 'free'
+  const preview = points.length < 2 || !tool || tool === 'pen' ? '' : tool === 'free'
     ? 'M' + points.map(p => p.join(' ')).join('L') + 'Z'
     : tool === 'cut' ? `M${first.join(' ')}L${last.join(' ')}`
     : shapeToD(drawFigure(tool, first, last).shape);
@@ -115,7 +118,8 @@ export function DrawingTools({ selected, scale, tx, ty }: { selected: Layer | nu
     ? `${Math.round(Math.abs(last[0] - first[0]))} × ${Math.round(Math.abs(last[1] - first[1]))}` : '';
 
   return <>
-    {tool && <svg className="drawing-surface" data-tool={tool} aria-label="Área de dibujo"
+    {tool === 'pen' && <PenSurface scale={scale} tx={tx} ty={ty} done={() => reset()} />}
+    {tool && tool !== 'pen' && <svg className="drawing-surface" data-tool={tool} aria-label="Área de dibujo"
       onPointerDown={e => {
         e.stopPropagation();
         if (e.button !== 0 || !e.isPrimary || busy) return;
@@ -151,7 +155,7 @@ export function DrawingTools({ selected, scale, tx, ty }: { selected: Layer | nu
           pressed={tool === 'cut'} onClick={() => reset(tool === 'cut' ? '' : 'cut')}><Scissors /></IconButton>
       </div>
       {tool && <div className="drawing-tools__hint" role="status" data-error={!!message}>
-        {message || HINTS[tool === 'cut' || tool === 'free' || tool === 'line' ? tool : 'shape']}
+        {message || HINTS[tool] || HINTS.shape}
         <span className="drawing-tools__esc"><kbd>Esc</kbd> para salir</span>
       </div>}
     </div>
