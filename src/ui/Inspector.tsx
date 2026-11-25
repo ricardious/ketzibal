@@ -103,7 +103,7 @@ function LayerInspector() {
   const { updateLayer, moveLayer, deleteLayer, isolate, beginEdit } = useStore.getState();
   if (!layer) return <p className="panel__empty">Selecciona una capa en la lista o en el lienzo para editarla.</p>;
 
-  if (additionalIds.length) return <section className="section"><h3 className="section__title">{additionalIds.length + 1} capas seleccionadas</h3><Button disabled={!canJoin} onClick={useStore.getState().joinSelected}>Unir trazos</Button><p className="t-body-sm">{canJoin ? 'Se conserva el estilo y la posición en la pila del primer trazo. Los extremos cercanos se conectan.' : 'Selecciona solo capas de trazo para unirlas.'}</p></section>;
+  if (additionalIds.length) return <section className="section"><h3 className="section__title">{additionalIds.length + 1} capas seleccionadas</h3><Button disabled={!canJoin} onClick={useStore.getState().joinSelected}>Unir trazos</Button><p className="t-body-sm">{canJoin ? 'La unión sigue la tinta de la imagen original y conserva el estilo del primer trazo.' : 'Selecciona solo capas de trazo para unirlas.'}</p></section>;
 
   const isBg = layer.kind === 'background';
   const usingRecognized = layer.shape === layer.recognized || (layer.shape.type !== 'path' && layer.shape.type !== 'strokes');
@@ -114,7 +114,7 @@ function LayerInspector() {
       <section className="section">
         {!isBg && <Button size="sm" variant="outline" icon={<Focus />} onClick={() => isolate(isolatedId ? null : layer.id)}>{isolatedId ? 'Salir del aislamiento' : 'Editar en aislamiento'}</Button>}
         {!isBg && <FigurePicker action="replace" />}
-        {isolatedId && <p className="t-body-sm">Arrastra los nodos para cambiar la forma o la pieza para moverla.</p>}
+        {isolatedId && <p className="t-body-sm">Arrastra una recta cerca del extremo que quieras mover. En una curva, arrastra la línea del manejador para alargarla, acortarla o girarla. En trazos, curvas y polígonos, selecciona un nodo cuadrado y pulsa Supr o Retroceso para borrarlo.</p>}
         {layer.kind === 'stroke' && !isolatedId && <p className="t-body-sm">Usa Mayús + clic para seleccionar otro trazo y unirlos.</p>}
         <div className="field">
           <label className="field__label" htmlFor="ly-name">Nombre</label>

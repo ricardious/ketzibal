@@ -3,6 +3,7 @@ import { detectCorners, fitClosed, fitOpen, mapLoop, refineCorner, smoothClosed,
 import { quantize } from './quantize';
 import { cleanupLabels, components, growInto, majoritySmooth, maskHoles, regionMask, regionStats, type Components, type LocalMask, type RegionStats } from './regions';
 import { centerStroke, chainRuns, detectBrownInk, detectInk, distanceTransform, skeletonPaths, thin, type Ink } from './lineart';
+import { resolveCrossings } from './crossings';
 import { fitClippedCircle } from './arcs';
 import { recognize } from './shapes';
 import { detectGlobalSymmetry, detectSymmetry, mirrorLoop, mirrorShape, reflectPoint, symmetrizeHalf } from './symmetry';
@@ -623,7 +624,8 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     const radius = distanceTransform(mask, W, H);
     const skeleton = thin(mask, W, H);
     let n = 0;
-    for (const points of skeletonPaths(skeleton, W, H, Math.max(2, ink.width * 0.45))) {
+    const runs = skeletonPaths(skeleton, W, H, Math.max(2, ink.width * 0.45));
+    for (const points of resolveCrossings(runs, mask, radius, W, ink.width)) {
       // En una unión el radio inscrito incluye las ramas vecinas. La mediana
       // a lo largo del tramo estima el grosor sin engordar todo el trazo.
       const radii = points.map(([x, y]) => radius[Math.floor(y) * W + Math.floor(x)]).sort((a, b) => a - b);

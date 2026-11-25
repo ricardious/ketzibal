@@ -12,8 +12,8 @@ export async function sampleFile(): Promise<File> {
   return new File([blob], 'ketzvia-simbolo.png', { type: 'image/png' });
 }
 
-export function download(text: string, name: string) {
-  const url = URL.createObjectURL(new Blob([text], { type: 'image/svg+xml' }));
+export function download(text: string, name: string, type = 'image/svg+xml') {
+  const url = URL.createObjectURL(new Blob([text], { type }));
   const a = document.createElement('a');
   a.href = url;
   a.download = name;

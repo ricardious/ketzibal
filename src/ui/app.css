@@ -370,3 +370,10 @@ kbd {
 .shortcuts__row dt { color: var(--on-surface-variant); }
 .shortcuts__row dd { margin: 0; display: flex; gap: 4px; flex: none; }
 @media (max-width: 640px) { .toasts { bottom: 64px; } }
+
+.node:focus { outline: none; fill: var(--primary); stroke-width: 2px; }
+
+.edit-grip { stroke: transparent; stroke-width: 13px; vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: grab; touch-action: none; }
+.edit-grip:hover, .edit-grip:active { stroke: var(--primary); stroke-opacity: 0.2; }
+.edit-grip:active { cursor: grabbing; }
+.ctrl-line { pointer-events: none; }

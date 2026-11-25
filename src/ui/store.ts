@@ -1,3 +1,4 @@
+import { isProject, readProject } from './lib/project';
 import { makeFigure, replaceFigure, type FigureType } from './lib/figures';
 import { joinStrokes } from '../engine/join';
 import { create } from 'zustand';
@@ -70,6 +71,7 @@ interface State {
 }
 
 const vectorizer = new Vectorizer();
+let loadSequence = 0;
 let paramTimer: ReturnType<typeof setTimeout> | undefined;
 let accTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -129,15 +131,26 @@ export const useStore = create<State>((set, get) => {
     menu: null,
 
     async loadFile(file) {
+      const sequence = ++loadSequence;
+      clearTimeout(paramTimer);
+      vectorizer.cancel();
       set({ status: 'loading', error: null });
       try {
-        const src = await loadImageFile(file);
+        const project = isProject(file) ? await readProject(file) : null;
+        const src = project?.source ?? await loadImageFile(file);
+        if (sequence !== loadSequence) { URL.revokeObjectURL(src.url); return; }
         const old = get().source;
         if (old) URL.revokeObjectURL(old.url);
         set({ source: src, layers: [], past: [], future: [], selectedId: null, additionalIds: [], isolatedId: null, accuracy: null, zoom: 1, pan: [0, 0] });
-        await get().run();
+        if (project) {
+          set({ ...project, status: 'done', progress: null, stats: null, contours: '', view: 'vector', hoverId: null, menu: null });
+          scheduleAccuracy();
+        } else await get().run();
       } catch (e) {
-        set({ status: 'error', error: e instanceof Error ? e.message : String(e) });
+        if (sequence !== loadSequence) return;
+        const error = e instanceof Error ? e.message : String(e);
+        if (get().source) { set({ status: 'done' }); get().toast(error); }
+        else { set({ status: 'error', error }); get().toast(error); }
       }
     },
 
@@ -214,14 +227,15 @@ export const useStore = create<State>((set, get) => {
       set({ selectedId: pieces[0].id, additionalIds: [], isolatedId: !original && isolatedId ? pieces[0].id : null, view: 'vector' });
     },
     joinSelected() {
-      const { layers, selectedId, additionalIds } = get();
+      const { layers, selectedId, additionalIds, source } = get();
       const ids = new Set([selectedId, ...additionalIds]);
       const members = layers.filter(l => ids.has(l.id));
       const primary = members.find(l => l.id === selectedId);
-      if (!primary || members.length < 2 || members.some(l => l.shape.type !== 'strokes' || !l.stroke)) return;
-      const joined = joinStrokes(primary, members);
+      if (!source || !primary || members.length < 2 || members.some(l => l.shape.type !== 'strokes' || !l.stroke)) return;
+      const { layer: joined, connections } = joinStrokes(primary, members, source.raster);
       commit(layers.filter(l => !ids.has(l.id) || l.id === primary.id).map(l => l.id === primary.id ? joined : l));
       set({ additionalIds: [] });
+      get().toast(connections ? `Conexiones realizadas: ${connections}` : 'Trazos agrupados. La imagen no muestra una conexión clara.');
     },
 
     beginEdit() {

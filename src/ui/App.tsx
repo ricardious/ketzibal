@@ -7,7 +7,7 @@ import { LayersPanel } from './LayersPanel';
 import { ShortcutsDialog } from './ShortcutsDialog';
 import { Toasts } from './Toasts';
 import { TopBar } from './TopBar';
-import { copySvg, exportFile, loadSample, pickFile, VIEW_KEYS, zoomBy } from './lib/actions';
+import { copySvg, exportFile, saveProject, loadSample, pickFile, VIEW_KEYS, zoomBy } from './lib/actions';
 import { ACCEPTED } from './lib/image';
 import { useStore } from './store';
 import './components/components.css';
@@ -39,6 +39,7 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); if (!e.repeat) void saveProject(); return; }
       const t = e.target as HTMLElement;
       if (t.closest('input, textarea, select, [contenteditable="true"], .mselect__list, .menu')) return;
       const st = useStore.getState();
@@ -64,7 +65,9 @@ export function App() {
       }
       const sel = st.layers.find((l) => l.id === st.selectedId);
       if (!sel) return;
-      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); st.deleteLayer(sel.id); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault();
+        if (!st.isolatedId) st.deleteLayer(sel.id);
+        return; }
       if (mod && k === 'd') { e.preventDefault(); st.duplicateLayer(sel.id); return; }
       if (!mod && k === 'h') { st.updateLayer(sel.id, { visible: !sel.visible }); return; }
       if (!mod && (e.key === '[' || e.key === ']')) {
