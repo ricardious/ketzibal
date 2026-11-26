@@ -1,3 +1,4 @@
+import { simplifyLayer } from './simplify';
 import { traceContours, type Contour } from './contour';
 import { detectCorners, fitClosed, fitOpen, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
 import { quantize } from './quantize';
@@ -656,7 +657,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   const ga = globalAxis && { ...globalAxis, p: [globalAxis.p[0] * inv, globalAxis.p[1] * inv] as Vec };
   onProgress({ stage: 'Listo', value: 1 });
   return {
-    width: src.width, height: src.height, layers: out, palette: q.hex, globalAxis: ga,
+    width: src.width, height: src.height, layers: out.map(layer => simplifyLayer(layer, params.tolerance)), palette: q.hex, globalAxis: ga,
     stats: { regions: cc.count, ms: Math.round(performance.now() - t0), workScale: scale },
   };
 }
