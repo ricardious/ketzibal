@@ -6,8 +6,9 @@ interface Arm { id: number; index: number; point: Vec; outward: Vec; width: numb
 interface Link { other: number; trim: number; bridge: Vec[] }
 
 /** Un cruce X se adelgaza a un nodo de cuatro brazos o dos nodos T con un
- * puente corto. Resolver solo estos casos; un extremo libre o una T se conserva. */
+ * puente corto. En una T se busca una única pareja con continuidad de tinta. */
 export function resolveCrossings(runs: Vec[][], mask: Uint8Array, radius: Float32Array, W: number, width: number): Vec[][] {
+  runs = runs.slice();
   const ends = runs.flatMap(r => [r[0], r[r.length - 1]]);
   const groups: number[][] = [];
   const nearby = new Map<number, number>();
@@ -84,6 +85,92 @@ export function resolveCrossings(runs: Vec[][], mask: Uint8Array, radius: Float3
     if (node[a] === node[b] || runs[i].length > width * 2.4 + 2) continue;
     const left = groups[node[a]], right = groups[node[b]];
     if (left.length === 3 && right.length === 3) attempt([...left.filter(id => id !== a), ...right.filter(id => id !== b)], i);
+  }
+  // Dos puntas cortas paralelas y un borde que gira entre sus bases forman
+  // un arco. Conservar el esqueleto observado en ambas uniones.
+  for (let i = 0; i < runs.length; i++) {
+    const first = 2*i, last = first+1;
+    const sides = [first,last];
+    if (removed.has(i) || node[first] === node[last]) continue;
+    const tips: number[] = [];
+    for (const end of sides) {
+      const ids = groups[node[end]];
+      if (ids.length !== 3 || ids.some(id => links.has(id) || removed.has(id >> 1))) break;
+      const free = ids.filter(id => id !== end && groups[node[id ^ 1]].length === 1 &&
+        dist(ends[id],ends[id ^ 1]) <= 3.5*width);
+      if (free.length !== 1) break;
+      tips.push(free[0]);
+    }
+    if (tips.length !== 2) continue;
+    const chord = sub(ends[last],ends[first]), span = dist(ends[first],ends[last]);
+    if (span < width || span > 6*width) continue;
+    const directions = tips.map(id => norm(sub(ends[id ^ 1],ends[id])));
+    if (dot(directions[0],directions[1]) < 0.8 || Math.abs(dot(norm(chord),directions[0])) > 0.65) continue;
+    const normal = sub(directions[0],scale(norm(chord),dot(norm(chord),directions[0])));
+    const depth = Math.max(...runs[i].map(p => -dot(sub(p,ends[first]),normal)));
+    if (depth < width*0.45) continue;
+    for (const [k,end] of sides.entries()) {
+      const tip = tips[k];
+      const trim = (id:number) => id % 2 ? runs[id >> 1].length-1 : 0;
+      // El adelgazamiento puede terminar antes del centro de una punta redonda.
+      // Prolongar solo dentro de la tinta y descontar el radio del remate SVG.
+      const dir = directions[k], free = tip ^ 1, origin = ends[free];
+      const at = (d:number): Vec => [origin[0]+dir[0]*d,origin[1]+dir[1]*d];
+      const radiusAt = (p:Vec) => radius[Math.floor(p[1])*W+Math.floor(p[0])] ?? 0;
+      const capRadius = Math.max(1,radiusAt(origin)-0.35);
+      let reach = 0;
+      while (reach < 3*width && radiusAt(at(reach)) > 0) reach += 0.5;
+      const extension: Vec[] = [];
+      if (reach < 3*width) {
+        for (let d=1; d<=reach-capRadius-0.5; d++) extension.push(at(d));
+      }
+      if (extension.length) {
+        const r = runs[tip >> 1];
+        // Copiar el tramo para conservar los índices del esqueleto de entrada.
+        runs[tip >> 1] = free % 2 ? [...r,...extension] : [...extension.reverse(),...r];
+      }
+      const u = runs[end >> 1], v = runs[tip >> 1];
+      const su = end % 2 ? -1 : 1, sv = tip % 2 ? -1 : 1;
+      const iu = stepInside(u,trim(end),su,Math.min(width,span*0.22));
+      const iv = stepInside(v,trim(tip),sv,Math.min(width,dist(ends[tip],origin)*0.55));
+      const p = u[iu], q = v[iv], chord = dist(p,q);
+      const tangent = (r:Vec[], at:number, step:number) => norm(sub(r[stepInside(r,at,step,width*0.6)],r[at]));
+      const c = [p,sub(p,scale(tangent(u,iu,su),chord/3)),sub(q,scale(tangent(v,iv,sv),chord/3)),q];
+      const bridge:Vec[] = [];
+      for (let j=1;j<Math.ceil(chord);j++) bridge.push(bez(c,j/Math.ceil(chord)));
+      const smooth = bridge.length > 0 && bridge.every(sample => radiusAt(sample) >= capRadius*0.65);
+      links.set(end,{other:tip,trim:smooth?iu:trim(end),bridge:smooth?bridge:[]});
+      links.set(tip,{other:end,trim:smooth?iv:trim(tip),bridge:smooth?[...bridge].reverse():[]});
+    }
+  }
+  for (const ids of groups) {
+    if (ids.length !== 3 || ids.some(id => links.has(id) || removed.has(id >> 1))) continue;
+    if (new Set(ids.map(id => id >> 1)).size !== 3) continue;
+    const arms = ids.map(id => {
+      const longArm = arm(id);
+      if (longArm) return longArm;
+      // En un remate corto, medir la dirección hasta la punta libre.
+      if (groups[node[id ^ 1]].length !== 1) return null;
+      const r = runs[id >> 1], start = id % 2 ? r.length-1 : 0;
+      const tip = ends[id ^ 1], origin = ends[id];
+      const length = dist(origin,tip);
+      if (length < width*0.65) return null;
+      const index = stepInside(r,start,id % 2 ? -1 : 1,length*0.65);
+      const point = r[index];
+      return { id, index, point, outward:norm(sub(tip,origin)),
+        width:Math.max(1,2*radius[Math.floor(point[1])*W+Math.floor(point[0])]-0.7) };
+    });
+    if (arms.some(a => !a)) continue;
+    const [a,b,c] = arms as Arm[];
+    const choices = [connect(a,b), connect(a,c), connect(b,c)]
+      .filter(candidate => candidate !== null)
+      .sort((u,v) => v.score - u.score);
+    const best = choices[0];
+    if (!best || (choices[1] && best.score - choices[1].score < 0.25)) continue;
+    const junction = ends[ids[0]];
+    if (!best.bridge.some(p => dist(p, junction) <= Math.min(best.a.width,best.b.width)*0.5)) continue;
+    links.set(best.a.id, {other:best.b.id, trim:best.a.index, bridge:best.bridge});
+    links.set(best.b.id, {other:best.a.id, trim:best.b.index, bridge:[...best.bridge].reverse()});
   }
   const out: Vec[][] = [], visited = new Set(removed);
   const follow = (start: number) => {
