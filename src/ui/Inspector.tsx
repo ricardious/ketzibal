@@ -1,6 +1,7 @@
 import { ArrowDownToLine, ArrowUpToLine, ChevronDown, ChevronUp, Focus, RotateCcw, Spline, Trash2, Wand2 } from 'lucide-react';
+import { simplifyLayer } from '../engine/simplify';
 import { useState } from 'react';
-import { KIND_NAMES, nodeCount, type Layer } from '../engine';
+import { KIND_NAMES, nodeCount, shapeBounds, shapeToD, type Layer } from '../engine';
 import { FigurePicker } from './components/FigurePicker';
 import { Button } from './components/Button';
 import { Slider } from './components/Slider';
@@ -93,6 +94,34 @@ function Params() {
   );
 }
 
+function SimplifyPreview({ layer }: { layer: Layer }) {
+  const [preview, setPreview] = useState<{ before: Layer; after: Layer } | null>(null);
+  const source = useStore(s => s.source);
+  const tolerance = useStore(s => s.params.tolerance);
+  const { updateLayer, toast } = useStore.getState();
+  if (!source) return null;
+  if (!preview || preview.before !== layer) return <Button size="sm" variant="outline" onClick={() => {
+    const after = simplifyLayer(layer, tolerance);
+    if (after === layer) toast('El trazo ya tiene el mínimo que se pudo obtener con esta tolerancia.');
+    else setPreview({ before: layer, after });
+  }}>{layer.shape.type === 'path' ? 'Ajustar por esquinas' : 'Simplificar trazo'}</Button>;
+  const count = (l: Layer) => [l.shape, ...l.holes].reduce((n, s) => n + nodeCount(s), 0);
+  const [x, y, right, bottom] = shapeBounds(layer.shape);
+  const pad = Math.max(3, layer.stroke?.width ?? 0, Math.max(right-x, bottom-y) * 0.05);
+  const candidate = preview.after;
+  return <div>
+    <svg width="100%" height="150" aria-label="Vista previa del contorno simplificado sobre el original"
+      viewBox={`${x-pad+layer.dx} ${y-pad+layer.dy} ${right-x+2*pad} ${bottom-y+2*pad}`}>
+      <image href={source.url} width={source.width} height={source.height} opacity={0.45} />
+      <path d={[candidate.shape, ...candidate.holes].map(s => shapeToD(s)).join(' ')} transform={`translate(${layer.dx} ${layer.dy})`}
+        fill="none" stroke="var(--primary)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+    </svg>
+    <p>{count(layer)} → {count(candidate)} nodos</p>
+    <Button size="sm" onClick={() => { updateLayer(layer.id, candidate); setPreview(null); }}>Aplicar</Button>
+    <Button size="sm" variant="outline" onClick={() => setPreview(null)}>Cancelar</Button>
+  </div>;
+}
+
 function LayerInspector() {
   const layer = useStore((s) => s.layers.find((l) => l.id === s.selectedId) ?? null);
   const additionalIds = useStore(s => s.additionalIds);
@@ -113,6 +142,7 @@ function LayerInspector() {
     <>
       <section className="section">
         {!isBg && <Button size="sm" variant="outline" icon={<Focus />} onClick={() => isolate(isolatedId ? null : layer.id)}>{isolatedId ? 'Salir del aislamiento' : 'Editar en aislamiento'}</Button>}
+        {!isBg && (layer.shape.type === 'path' || layer.shape.type === 'strokes') && <SimplifyPreview key={layer.id} layer={layer} />}
         {!isBg && <FigurePicker action="replace" />}
         {isolatedId && <p className="t-body-sm">Arrastra una recta cerca del extremo que quieras mover. En una curva, arrastra la línea del manejador para alargarla, acortarla o girarla. En trazos, curvas y polígonos, selecciona un nodo cuadrado y pulsa Supr o Retroceso para borrarlo.</p>}
         {layer.kind === 'stroke' && !isolatedId && <p className="t-body-sm">Usa Mayús + clic para seleccionar otro trazo y unirlos.</p>}

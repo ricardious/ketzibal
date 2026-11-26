@@ -1,3 +1,4 @@
+import { simplifyLayer } from './simplify';
 import { traceContours, type Contour } from './contour';
 import { detectCorners, fitClosed, fitOpen, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
 import { quantize } from './quantize';
@@ -131,14 +132,33 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   const total = () => cc.count + virt.length;
   const labelOf = (c: number) => (c < cc.count ? cc.label[c] : virt[c - cc.count].label);
   const areaOf = (c: number) => (c < cc.count ? st.area[c] : virt[c - cc.count].area);
+  const globalAxis = params.symmetry ? detectGlobalSymmetry(q.labels, W, H) : null;
+  const visibleHalf = new Map<number, Vec | null>();
   const pendingAbsorb: number[] = [];
   if (ink) {
     const fg = new Int32Array(W * H);
     for (let i = 0; i < W * H; i++) fg[i] = cc.comp[i] !== bg && q.labels[i] >= 0 ? 1 : 0;
+    // Una línea de tinta cerrada entre dos rellenos también delimita una pieza.
+    // Clasificar primero los interiores y llevar su identidad hasta la línea media
+    // con las regiones de color ya expandidas, sin abrir rendijas entre las piezas.
+    const interiors = Int32Array.from(fg, (v,i) => v && !ink!.mask[i] ? 1 : 0);
+    const basins = components(interiors, W, H);
+    const votes = Array.from({length:cc.count}, () => new Map<number,number>());
+    for (let i=0; i<fg.length; i++) {
+      if (!interiors[i]) continue;
+      const region = votes[cc.comp[i]], basin = basins.comp[i];
+      region.set(basin,(region.get(basin) ?? 0)+1);
+    }
+    const basinOf = votes.map((counts,c) => {
+      let best = basins.count+c, weight = 0;
+      for (const [id,v] of counts) if (v > weight) { best=id; weight=v; }
+      return best+1;
+    });
+    for (let i=0; i<fg.length; i++) if (fg[i]) fg[i]=basinOf[cc.comp[i]];
     const figs = components(fg, W, H);
     const fst = regionStats(figs, W, H);
     for (let f = 0; f < figs.count; f++) {
-      if (figs.label[f] !== 1 || fst.area[f] < W * H * 0.002) continue;
+      if (figs.label[f] <= 0 || fst.area[f] < W * H * 0.002) continue;
       const regionArea = new Map<number, number>();
       let edge = 0, inked = 0;
       for (let y = fst.y0[f]; y <= fst.y1[f]; y++) for (let x = fst.x0[f]; x <= fst.x1[f]; x++) {
@@ -173,6 +193,84 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
         if (nodes[c].parent !== bg && nodes[c].parent >= 0) continue;
         nodes[c].parent = v;
         if (cc.label[c] === silLabel) pendingAbsorb.push(c);
+      }
+    }
+    // Recuperar un fragmento separado por un accesorio cuando su reflejo
+    // pertenece a la misma región de color dentro de la silueta principal.
+    if (globalAxis && params.reconstructHidden) {
+      const axis = globalAxis;
+      const reflected = (x:number,y:number) => {
+        const [rx,ry] = reflectPoint([x+0.5,y+0.5],axis);
+        return rx>=0 && rx<W && ry>=0 && ry<H ? cc.comp[Math.floor(ry)*W+Math.floor(rx)] : -1;
+      };
+      for (let c=0;c<cc.count;c++) {
+        if (nodes[c].parent !== bg || c===bg || st.area[c]<20) continue;
+        const piece = regionMask(cc,st,c,W);
+        const votes = new Map<number,number>();
+        for (let j=0;j<piece.data.length;j++) if (piece.data[j]) {
+          const other=reflected(piece.ox+j%piece.w,piece.oy+Math.floor(j/piece.w));
+          if (other>=0 && cc.label[other]===cc.label[c]) votes.set(other,(votes.get(other)??0)+1);
+        }
+        for (const [other,count] of votes) {
+          const parent=nodes[other].parent, base=virt[parent-cc.count];
+          if (!base || base.label!==cc.label[c] || count<0.85*st.area[c] || st.area[other]<4*st.area[c]) continue;
+          const m=base.mask, pad=Math.ceil(4*ink.width);
+          if (st.x0[c]<m.ox || st.x1[c]>=m.ox+m.w || st.y0[c]<m.oy || st.y1[c]>=m.oy+m.h) continue;
+          const additions:number[]=[];
+          let connected=false;
+          for(let y=Math.max(m.oy,st.y0[c]-pad);y<=Math.min(m.oy+m.h-1,st.y1[c]+pad);y++) {
+            for(let x=Math.max(m.ox,st.x0[c]-pad);x<=Math.min(m.ox+m.w-1,st.x1[c]+pad);x++) {
+              const j=(y-m.oy)*m.w+x-m.ox, own=cc.comp[y*W+x];
+              if(own===bg || cc.label[own]<0 || (own!==c && reflected(x,y)!==other)) continue;
+              if(m.data[j]) connected=true;
+              else additions.push(j);
+            }
+          }
+          if (!connected) continue;
+          for(const j of additions) m.data[j]=1;
+          const witness = reflectPoint([(st.x0[c]+st.x1[c]+1)/2,(st.y0[c]+st.y1[c]+1)/2],axis);
+          const dim = axis.angle === 90 ? 0 : 1;
+          const previous = visibleHalf.get(parent);
+          visibleHalf.set(parent, previous === undefined || (previous && (previous[dim]-axis.p[dim])*(witness[dim]-axis.p[dim])>0) ? witness : null);
+          base.area+=additions.length;
+          nodes[parent].filledArea+=additions.length;
+          nodes[c].parent=parent;
+          pendingAbsorb.push(c);
+          break;
+        }
+      }
+      // Una pareja lateral puede llevar su propio relleno sobre el cuerpo.
+      // Incluir ambas superficies en la base para seguir el borde exterior.
+      for (const [parent,witness] of visibleHalf) {
+        if (!witness) continue;
+        const base = virt[parent-cc.count], m = base.mask;
+        const fits = (c:number) => c !== bg && c >= 0 && nodes[c].parent === bg &&
+          st.area[c] >= 20 && st.area[c] < base.area*0.15 &&
+          st.x0[c]>=m.ox && st.x1[c]<m.ox+m.w && st.y0[c]>=m.oy && st.y1[c]<m.oy+m.h &&
+          (st.adj[c].get(bg) ?? 0)>ink.width &&
+          [...st.adj[c]].some(([other,length])=>nodes[other].parent===parent && length>ink.width);
+        for (let c=0; c<cc.count; c++) {
+          if (!fits(c)) continue;
+          const pixels=regionMask(cc,st,c,W);
+          const matches=new Map<number,number>();
+          for(let j=0;j<pixels.data.length;j++) if(pixels.data[j]) {
+            const twin=reflected(pixels.ox+j%pixels.w,pixels.oy+Math.floor(j/pixels.w));
+            if(twin>c && cc.label[twin]===cc.label[c]) matches.set(twin,(matches.get(twin)??0)+1);
+          }
+          for(const [twin,overlap] of matches) {
+            if(overlap<0.85*Math.max(st.area[c],st.area[twin]) || !fits(twin)) continue;
+            for(const id of [c,twin]) {
+              for(let y=st.y0[id];y<=st.y1[id];y++) for(let x=st.x0[id];x<=st.x1[id];x++) {
+                const j=(y-m.oy)*m.w+x-m.ox;
+                if(cc.comp[y*W+x]===id && !m.data[j]) {
+                  m.data[j]=1; base.area++; nodes[parent].filledArea++;
+                }
+              }
+              nodes[id].parent=parent;
+            }
+            break;
+          }
+        }
       }
     }
   }
@@ -263,7 +361,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   for (const c of order) rank[c] = nodes[c].rank;
 
   // Eje de simetría global de la composición
-  const globalAxis = params.symmetry ? detectGlobalSymmetry(q.labels, W, H) : null;
+
 
   onProgress({ stage: 'Reconstruyendo figuras', value: 0.55 });
   const layers: Layer[] = [];
@@ -351,7 +449,18 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
 
     // eje de simetría propio (o global si coincide)
     let axis: SymmetryAxis | null = null;
-    if (params.symmetry && !occluded && !touchesNetwork) {
+    const reference = visibleHalf.get(c);
+    if (reference && globalAxis) {
+      let inside = 0, overlap = 0;
+      for (let i=0; i<m.data.length; i++) if (m.data[i]) {
+        inside++;
+        const [x,y] = reflectPoint([m.ox+i%m.w+0.5,m.oy+Math.floor(i/m.w)+0.5],globalAxis);
+        if (isInside(m,Math.floor(x),Math.floor(y))) overlap++;
+      }
+      const score = overlap / (2*inside-overlap);
+      if (score >= 0.94) axis = {...globalAxis,score};
+    }
+    if (!axis && params.symmetry && !occluded && !touchesNetwork) {
       axis = detectSymmetry(m);
       if (axis && globalAxis && Math.abs(axis.angle - globalAxis.angle) < 2) {
         const off = Math.abs(globalAxis.angle === 90 ? axis.p[0] - globalAxis.p[0] : axis.p[1] - globalAxis.p[1]);
@@ -363,7 +472,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     let half: Vec[] | null = null;
     let basePts = light;
     if (axis) {
-      half = symmetrizeHalf(light, axis);
+      half = symmetrizeHalf(light, axis, reference ?? undefined);
       if (half) basePts = mirrorClosedPts(half, axis);
       else axis = null;
     }
@@ -656,7 +765,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   const ga = globalAxis && { ...globalAxis, p: [globalAxis.p[0] * inv, globalAxis.p[1] * inv] as Vec };
   onProgress({ stage: 'Listo', value: 1 });
   return {
-    width: src.width, height: src.height, layers: out, palette: q.hex, globalAxis: ga,
+    width: src.width, height: src.height, layers: out.map(layer => simplifyLayer(layer, params.tolerance)), palette: q.hex, globalAxis: ga,
     stats: { regions: cc.count, ms: Math.round(performance.now() - t0), workScale: scale },
   };
 }

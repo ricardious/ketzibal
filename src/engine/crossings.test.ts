@@ -32,8 +32,9 @@ it.each([1, -1])('mantiene cada eje al atravesar dos cruces oblicuos (sentido %i
   }
 });
 
-it('conserva los tres brazos de una T y un trazo vecino separado', () => {
+it('une la línea continua de una T y conserva la rama y el trazo vecino', () => {
   const paths = trace([[[20, 90], [180, 90], 4], [[100, 90], [100, 180], 4], [[20, 75], [180, 75], 4]]);
-  expect(paths).toHaveLength(4);
-  expect(paths.filter(p => [p[0], p[p.length - 1]].some(([x, y]) => Math.hypot(x - 100, y - 90) < 4))).toHaveLength(3);
+  expect(paths).toHaveLength(3);
+  expect(paths.some(p => [p[0],p[p.length-1]].every(v => Math.abs(v[1]-90)<2) && Math.abs(p[0][0]-p[p.length-1][0])>150)).toBe(true);
+  expect(paths.filter(p => [p[0], p[p.length - 1]].some(([x, y]) => Math.hypot(x - 100, y - 90) < 4))).toHaveLength(1);
 });

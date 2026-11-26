@@ -118,7 +118,7 @@ export function detectGlobalSymmetry(labels: Int32Array, W: number, H: number): 
  * Simetriza un contorno cerrado: promedia cada mitad con el reflejo de la otra.
  * Devuelve la mitad canónica (de un cruce del eje al otro) o null si no es aplicable.
  */
-export function symmetrizeHalf(pts: Vec[], axis: SymmetryAxis): Vec[] | null {
+export function symmetrizeHalf(pts: Vec[], axis: SymmetryAxis, reference?: Vec): Vec[] | null {
   const n = pts.length;
   const a = axis.angle * DEG;
   const u: Vec = [Math.cos(a), Math.sin(a)], nrm: Vec = [-u[1], u[0]];
@@ -138,6 +138,16 @@ export function symmetrizeHalf(pts: Vec[], axis: SymmetryAxis): Vec[] | null {
   };
   const A = walk(c1, c2), B = walk(c2, c1);
   if (A.length < 3 || B.length < 3) return null;
+  if (reference) {
+    if (cross.length !== 2) return null;
+    const wanted = dot(sub(reference,axis.p),nrm);
+    const half = A.reduce((sum,p)=>sum+dot(sub(p,axis.p),nrm),0)*wanted > 0 ? A : B.reverse();
+    const intersection = (i:number) => {
+      const j=(i+1)%n;
+      return lerp(pts[i],pts[j],side[i]/(side[i]-side[j]));
+    };
+    return [intersection(c1),...half,intersection(c2)].filter((p,i,list)=>!i || dist(p,list[i-1])>1e-8);
+  }
   const Bm = B.reverse().map((p) => reflectPoint(p, axis));
   const M = Math.max(A.length, Bm.length);
   const ra = resample(A, M), rb = resample(Bm, M);
