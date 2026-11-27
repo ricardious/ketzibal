@@ -178,17 +178,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       virt.push({ mask, label: silLabel, area: fst.area[f] });
       nodes.push({ c: v, parent: bg, children: [], filledArea: fst.area[f], realHoles: new Set(), rank: -1 });
       enclosers.push([]);
-      const contents = new Map<number, Map<number, number>>();
-      const { hole, count } = maskHoles(mask);
-      for (let p = 0; p < hole.length && count; p++) {
-        if (!hole[p]) continue;
-        nodes[v].filledArea++;
-        const o = cc.comp[(mask.oy + Math.floor(p / mask.w)) * W + mask.ox + (p % mask.w)];
-        let mm = contents.get(hole[p]);
-        if (!mm) contents.set(hole[p], (mm = new Map()));
-        mm.set(o, (mm.get(o) ?? 0) + 1);
-      }
-      holeContents.push(contents);
+      holeContents.push(new Map());
       for (const [c] of regionArea) {
         if (nodes[c].parent !== bg && nodes[c].parent >= 0) continue;
         nodes[c].parent = v;
@@ -271,6 +261,22 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
             break;
           }
         }
+      }
+    }
+    // Clasificar huecos sobre la máscara final: una unión puede crear huecos
+    // y cambiar los identificadores de los que ya existían.
+    for (const [index,base] of virt.entries()) {
+      const parent = cc.count + index, m = base.mask;
+      nodes[parent].filledArea = base.area;
+      const contents = holeContents[parent];
+      const {hole,count} = maskHoles(m);
+      for (let j = 0; count && j < hole.length; j++) {
+        if (!hole[j]) continue;
+        nodes[parent].filledArea++;
+        const region = cc.comp[(m.oy + Math.floor(j / m.w)) * W + m.ox + j % m.w];
+        let counts = contents.get(hole[j]);
+        if (!counts) contents.set(hole[j], counts = new Map());
+        counts.set(region, (counts.get(region) ?? 0) + 1);
       }
     }
   }
@@ -458,6 +464,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
         if (isInside(m,Math.floor(x),Math.floor(y))) overlap++;
       }
       const score = overlap / (2*inside-overlap);
+
       if (score >= 0.94) axis = {...globalAxis,score};
     }
     if (!axis && params.symmetry && !occluded && !touchesNetwork) {
