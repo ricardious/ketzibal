@@ -1,3 +1,4 @@
+import { reverseStroke } from './join';
 import { simplifyLayer } from './simplify';
 import { traceContours, type Contour } from './contour';
 import { detectCorners, fitClosed, fitOpen, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
@@ -9,7 +10,7 @@ import { fitClippedCircle } from './arcs';
 import { recognize } from './shapes';
 import { detectGlobalSymmetry, detectSymmetry, mirrorLoop, mirrorShape, reflectPoint, symmetrizeHalf } from './symmetry';
 import type { BezierLoop, BezierPath, Layer, Progress, RasterImage, Shape, ShapeKind, SymmetryAxis, Vec, VectorizeParams, VectorizeResult } from './types';
-import { convexHull, dist, inPolygon, segDist } from './vec';
+import { convexHull, dist, dot, norm, sub, inPolygon, segDist } from './vec';
 import { shapeToD } from './svg';
 import { KIND_NAMES } from './names';
 
@@ -737,6 +738,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   // Simetría global: figuras gemelas a ambos lados del eje se reflejan exactamente.
   if (globalAxis) mirrorTwins(layers, globalAxis);
 
+  const attachedLoops = new Map<string,string>();
   if (ink && ink.branched.some(label => label >= 0)) {
     const mask = Uint8Array.from(ink.branched, label => Number(label >= 0));
     const radius = distanceTransform(mask, W, H);
@@ -763,6 +765,37 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       }
     });
     const chains = resolveCrossings(runs, mask, radius, W, ink.width, boundaries.values());
+    // Un lazo que toca otra línea empieza en la unión con la rama más larga.
+    // El esqueleto puede representar una unión por varios píxeles vecinos.
+    const endpoints = new Map<number, {point: Vec; length: number; id:string}>();
+    for (const [index,chain] of chains.entries()) {
+      if (dist(chain[0],chain[chain.length-1]) === 0) continue;
+      const length = chain.reduce((sum,p,i) => sum + (i ? dist(p,chain[i-1]) : 0), 0);
+      for (const point of [chain[0], chain[chain.length-1]]) {
+        const key = Math.floor(point[1])*W + Math.floor(point[0]);
+        if (length > (endpoints.get(key)?.length ?? 0)) endpoints.set(key,{point,length,id:`tinta-${index+1}`});
+      }
+    }
+    const pinned = new Set<Vec>();
+    const anchors = new Map<Vec[], {index:number; point:Vec; id:string}>();
+    for (const chain of chains) {
+      if (dist(chain[0],chain[chain.length-1]) !== 0) continue;
+      let longest = 0, nearest = Infinity;
+      for (let i = 0; i < chain.length-1; i++) {
+        const p = chain[i];
+        for (let dy=-1; dy<=1; dy++) for (let dx=-1; dx<=1; dx++) {
+          const end = endpoints.get((Math.floor(p[1])+dy)*W + Math.floor(p[0])+dx);
+          if (!end) continue;
+          const gap = dist(p,end.point);
+          if (gap > Math.SQRT2 || end.length < longest || (end.length === longest && gap >= nearest)) continue;
+          anchors.set(chain,{index:i,point:end.point,id:end.id});
+          longest = end.length;
+          nearest = gap;
+        }
+      }
+      const anchor = anchors.get(chain);
+      if (anchor) pinned.add(anchor.point);
+    }
     for (const points of chains) {
       // En una unión el radio inscrito incluye las ramas vecinas. La mediana
       // a lo largo del tramo estima el grosor sin engordar todo el trazo.
@@ -774,10 +807,18 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       const error = Math.min(tol, Math.max(0.4, width * 0.09));
       const centered = centerStroke(points, mask, W, width);
       let path: BezierPath;
-      if (closed) {
+      const anchor = anchors.get(points);
+      if (anchor) {
+        const ring = smoothClosed(centered.slice(0,-1), smooth);
+        const ordered = [anchor.point, ...ring.slice(anchor.index+1), ...ring.slice(0,anchor.index), anchor.point];
+        path = {start:anchor.point, segs:fitOpen(dedupe(ordered),error), closed:true};
+        attachedLoops.set(`tinta-${n+1}`,anchor.id);
+      } else if (closed) {
         const ring = smoothClosed(centered.slice(0, -1), smooth);
         path = { ...fitClosed(ring, [], error), closed: true };
       } else {
+        if (pinned.has(first)) centered[0] = first;
+        if (pinned.has(last)) centered[centered.length-1] = last;
         const run = smoothOpen(centered, smooth);
         path = { start: run[0], segs: fitOpen(run, error) };
       }
@@ -791,10 +832,30 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   // Escalar a coordenadas de la imagen original
   const inv = 1 / scale;
   const out = scale === 1 ? layers : layers.map((l) => scaleLayer(l, inv));
+  const simplified = out.map(layer => simplifyLayer(layer, params.tolerance, attachedLoops.has(layer.id)));
+  const byId = new Map(simplified.map(layer => [layer.id,layer]));
+  for (const [loopId,branchId] of attachedLoops) {
+    const loop = byId.get(loopId), branch = byId.get(branchId);
+    if (loop?.shape.type !== 'strokes' || branch?.shape.type !== 'strokes') continue;
+    const ring = loop.shape.paths[0], stem = branch.shape.paths[0];
+    if (!ring.segs.length || !stem.segs.length) continue;
+    const incoming = dist(stem.start,ring.start) < 1e-6 ? reverseStroke(stem) : stem;
+    const tip = incoming.segs[incoming.segs.length-1];
+    if (dist(tip.p,ring.start) > 1e-6) continue;
+    // Recorrer primero el lado del lazo que continúa la tangente de la rama.
+    const tangent = norm(sub(tip.p,tip.c2));
+    const forward = norm(sub(ring.segs[0].c1,ring.start));
+    const backward = norm(sub(ring.segs[ring.segs.length-1].c2,ring.start));
+    const turn = dot(tangent,forward) >= dot(tangent,backward) ? ring : reverseStroke(ring);
+    const shape: Shape = {type:'strokes',paths:[{start:incoming.start,segs:[...incoming.segs,...turn.segs]}]};
+    branch.shape = branch.freeform = shape;
+    branch.area += loop.area;
+    byId.delete(loopId);
+  }
   const ga = globalAxis && { ...globalAxis, p: [globalAxis.p[0] * inv, globalAxis.p[1] * inv] as Vec };
   onProgress({ stage: 'Listo', value: 1 });
   return {
-    width: src.width, height: src.height, layers: out.map(layer => simplifyLayer(layer, params.tolerance)), palette: q.hex, globalAxis: ga,
+    width: src.width, height: src.height, layers: [...byId.values()], palette: q.hex, globalAxis: ga,
     stats: { regions: cc.count, ms: Math.round(performance.now() - t0), workScale: scale },
   };
 }
