@@ -7,7 +7,7 @@ interface Link { other: number; trim: number; bridge: Vec[] }
 
 /** Un cruce X se adelgaza a un nodo de cuatro brazos o dos nodos T con un
  * puente corto. En una T se busca una única pareja con continuidad de tinta. */
-export function resolveCrossings(runs: Vec[][], mask: Uint8Array, radius: Float32Array, W: number, width: number): Vec[][] {
+export function resolveCrossings(runs: Vec[][], mask: Uint8Array, radius: Float32Array, W: number, width: number, boundaries: Iterable<number[]> = []): Vec[][] {
   runs = runs.slice();
   const ends = runs.flatMap(r => [r[0], r[r.length - 1]]);
   const groups: number[][] = [];
@@ -63,6 +63,22 @@ export function resolveCrossings(runs: Vec[][], mask: Uint8Array, radius: Float3
   };
 
   const links = new Map<number, Link>(), removed = new Set<number>();
+  // Solo reservar bordes completos: en cada unión del perímetro entran y
+  // salen exactamente dos ramas de la misma región.
+  for (const perimeter of boundaries) {
+    const joints = new Map<number, number[]>();
+    for (const i of perimeter) for (const end of [2*i,2*i+1]) {
+      const key = node[end];
+      if (!joints.has(key)) joints.set(key,[]);
+      joints.get(key)!.push(end);
+    }
+    if ([...joints.values()].some(ids => ids.length !== 2 || ids.some(id => links.has(id)))) continue;
+    for (const [a,b] of joints.values()) {
+      const trim = (id: number) => id % 2 ? runs[id >> 1].length - 1 : 0;
+      links.set(a, {other:b, trim:trim(a), bridge:[]});
+      links.set(b, {other:a, trim:trim(b), bridge:[]});
+    }
+  }
   const attempt = (ids: number[], connector?: number) => {
     if (ids.length !== 4 || new Set(ids.map(id => id >> 1)).size !== 4 || ids.some(id => links.has(id) || removed.has(id >> 1))) return;
     const arms = ids.map(arm);
@@ -85,6 +101,40 @@ export function resolveCrossings(runs: Vec[][], mask: Uint8Array, radius: Float3
     if (node[a] === node[b] || runs[i].length > width * 2.4 + 2) continue;
     const left = groups[node[a]], right = groups[node[b]];
     if (left.length === 3 && right.length === 3) attempt([...left.filter(id => id !== a), ...right.filter(id => id !== b)], i);
+  }
+  // Un arco corto puede salir de un borde y volver a tocarlo. En ese
+  // cruce la tangente local describe el arco mejor que su cuerda completa.
+  for (let i = 0; i < runs.length; i++) {
+    if (removed.has(i) || runs[i].length > width*2.4+2) continue;
+    const left = groups[node[2*i]], right = groups[node[2*i+1]];
+    if (left === right || left.length !== 3 || right.length !== 3) continue;
+    const a = left.filter(id => id !== 2*i), b = right.filter(id => id !== 2*i+1);
+    if (![a,b].some(([u,v]) => node[u^1] === node[v^1])) continue;
+    if ([...left,...right].some(id => links.has(id) || removed.has(id>>1))) continue;
+    if (new Set([...a,...b].map(id=>id>>1)).size !== 4) continue;
+    const localArm = (id:number): Arm => {
+      const r = runs[id>>1], step = id%2 ? -1 : 1, start = step<0 ? r.length-1 : 0;
+      const index = stepInside(r,start,step,width*0.45);
+      const far = stepInside(r,index,step,width*0.75);
+      const p = r[index];
+      return {id,index,point:p,outward:norm(sub(r[far],p)),width:2*radius[Math.floor(p[1])*W+Math.floor(p[0])]};
+    };
+    const [u,v] = a.map(localArm), [x,y] = b.map(localArm);
+    const options = [[[u,x],[v,y]],[[u,y],[v,x]]].map(pairs => ({
+      pairs, score: pairs.reduce((s,[p,q])=>s-dot(p.outward,q.outward),0)
+    })).sort((p,q)=>q.score-p.score);
+    const best=options[0];
+    if (best.score-options[1].score<0.35 || best.pairs.some(([p,q])=>-dot(p.outward,q.outward)<0.65)) continue;
+    const bridges=best.pairs.map(([p,q])=>{
+      const d=dist(p.point,q.point), c=[p.point,sub(p.point,scale(p.outward,d/3)),sub(q.point,scale(q.outward,d/3)),q.point];
+      return Array.from({length:Math.max(0,Math.ceil(d)-1)},(_,k)=>bez(c,(k+1)/Math.ceil(d)));
+    });
+    if (bridges.some(samples=>samples.some(([x,y])=>!mask[Math.floor(y)*W+Math.floor(x)]))) continue;
+    best.pairs.forEach(([p,q],k)=>{
+      links.set(p.id,{other:q.id,trim:p.index,bridge:bridges[k]});
+      links.set(q.id,{other:p.id,trim:q.index,bridge:[...bridges[k]].reverse()});
+    });
+    removed.add(i);
   }
   // Dos puntas cortas paralelas y un borde que gira entre sus bases forman
   // un arco. Conservar el esqueleto observado en ambas uniones.

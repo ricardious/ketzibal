@@ -1,6 +1,7 @@
+import { reverseStroke } from './join';
 import { simplifyLayer } from './simplify';
 import { traceContours, type Contour } from './contour';
-import { detectCorners, fitClosed, fitOpen, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
+import { detectCorners, sampleLoop, fitClosed, fitOpen, intersectLines, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
 import { quantize } from './quantize';
 import { cleanupLabels, components, growInto, majoritySmooth, maskHoles, regionMask, regionStats, type Components, type LocalMask, type RegionStats } from './regions';
 import { centerStroke, chainRuns, detectBrownInk, detectInk, distanceTransform, skeletonPaths, thin, type Ink } from './lineart';
@@ -9,7 +10,7 @@ import { fitClippedCircle } from './arcs';
 import { recognize } from './shapes';
 import { detectGlobalSymmetry, detectSymmetry, mirrorLoop, mirrorShape, reflectPoint, symmetrizeHalf } from './symmetry';
 import type { BezierLoop, BezierPath, Layer, Progress, RasterImage, Shape, ShapeKind, SymmetryAxis, Vec, VectorizeParams, VectorizeResult } from './types';
-import { convexHull, dist, inPolygon, segDist } from './vec';
+import { convexHull, dist, dot, norm, sub, inPolygon, segDist } from './vec';
 import { shapeToD } from './svg';
 import { KIND_NAMES } from './names';
 
@@ -134,6 +135,8 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   const areaOf = (c: number) => (c < cc.count ? st.area[c] : virt[c - cc.count].area);
   const globalAxis = params.symmetry ? detectGlobalSymmetry(q.labels, W, H) : null;
   const visibleHalf = new Map<number, Vec | null>();
+  const pairedDetails = new Set<number>();
+  const inkCircles: { shape: Extract<Shape,{type:'circle'}>; width:number; fill:string }[] = [];
   const pendingAbsorb: number[] = [];
   if (ink) {
     const fg = new Int32Array(W * H);
@@ -143,6 +146,38 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     // con las regiones de color ya expandidas, sin abrir rendijas entre las piezas.
     const interiors = Int32Array.from(fg, (v,i) => v && !ink!.mask[i] ? 1 : 0);
     const basins = components(interiors, W, H);
+    if (params.detectShapes) {
+      const stats = regionStats(basins,W,H);
+      for (let b=0; b<basins.count; b++) {
+        if (!basins.label[b] || stats.border[b] || stats.area[b]<20) continue;
+        const w=stats.x1[b]-stats.x0[b]+1, h=stats.y1[b]-stats.y0[b]+1;
+        if (Math.abs(w-h)>Math.max(1,0.08*w)) continue;
+        const cx=(stats.x0[b]+stats.x1[b]+1)/2, cy=(stats.y0[b]+stats.y1[b]+1)/2;
+        const inner=Math.sqrt(stats.area[b]/Math.PI);
+        if (Math.abs(inner-(w+h)/4)>Math.max(0.6,inner*0.06)) continue;
+        const widths:number[]=[];
+        for (let i=0;i<48;i++) {
+          const dx=Math.cos(i*Math.PI/24), dy=Math.sin(i*Math.PI/24);
+          const pixel=(r:number) => {
+            const x=Math.floor(cx+r*dx), y=Math.floor(cy+r*dy);
+            return x>=0 && x<W && y>=0 && y<H ? y*W+x : -1;
+          };
+          let r=0;
+          while (r<inner*1.3+2 && basins.comp[pixel(r)]===b) r+=0.5;
+          if (Math.abs(r-inner)>Math.max(1.2,inner*0.10) || ink.branched[pixel(r)]<0) break;
+          const edge=r;
+          while (r-edge<ink.width*4 && ink.mask[pixel(r)]) r+=0.5;
+          widths.push(r-edge);
+        }
+        if (widths.length!==48) continue;
+        widths.sort((a,b)=>a-b);
+        // Los radios que coinciden con una rama sobreestiman el grosor.
+        const width=widths[16];
+        if (width<2 || widths[24]>1.35*width) continue;
+        inkCircles.push({shape:{type:'circle',cx,cy,r:inner+width/2},width,
+          fill:q.hex[q.labels[Math.floor(cy)*W+Math.floor(cx)]]});
+      }
+    }
     const votes = Array.from({length:cc.count}, () => new Map<number,number>());
     for (let i=0; i<fg.length; i++) {
       if (!interiors[i]) continue;
@@ -178,17 +213,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       virt.push({ mask, label: silLabel, area: fst.area[f] });
       nodes.push({ c: v, parent: bg, children: [], filledArea: fst.area[f], realHoles: new Set(), rank: -1 });
       enclosers.push([]);
-      const contents = new Map<number, Map<number, number>>();
-      const { hole, count } = maskHoles(mask);
-      for (let p = 0; p < hole.length && count; p++) {
-        if (!hole[p]) continue;
-        nodes[v].filledArea++;
-        const o = cc.comp[(mask.oy + Math.floor(p / mask.w)) * W + mask.ox + (p % mask.w)];
-        let mm = contents.get(hole[p]);
-        if (!mm) contents.set(hole[p], (mm = new Map()));
-        mm.set(o, (mm.get(o) ?? 0) + 1);
-      }
-      holeContents.push(contents);
+      holeContents.push(new Map());
       for (const [c] of regionArea) {
         if (nodes[c].parent !== bg && nodes[c].parent >= 0) continue;
         nodes[c].parent = v;
@@ -267,10 +292,27 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
                 }
               }
               nodes[id].parent=parent;
+              pairedDetails.add(id);
             }
             break;
           }
         }
+      }
+    }
+    // Clasificar huecos sobre la máscara final: una unión puede crear huecos
+    // y cambiar los identificadores de los que ya existían.
+    for (const [index,base] of virt.entries()) {
+      const parent = cc.count + index, m = base.mask;
+      nodes[parent].filledArea = base.area;
+      const contents = holeContents[parent];
+      const {hole,count} = maskHoles(m);
+      for (let j = 0; count && j < hole.length; j++) {
+        if (!hole[j]) continue;
+        nodes[parent].filledArea++;
+        const region = cc.comp[(m.oy + Math.floor(j / m.w)) * W + m.ox + j % m.w];
+        let counts = contents.get(hole[j]);
+        if (!counts) contents.set(hole[j], counts = new Map());
+        counts.set(region, (counts.get(region) ?? 0) + 1);
       }
     }
   }
@@ -450,7 +492,10 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     // eje de simetría propio (o global si coincide)
     let axis: SymmetryAxis | null = null;
     const reference = visibleHalf.get(c);
-    if (reference && globalAxis) {
+    const spansAxis = globalAxis && (globalAxis.angle === 90
+      ? m.ox < globalAxis.p[0] && globalAxis.p[0] < m.ox+m.w
+      : m.oy < globalAxis.p[1] && globalAxis.p[1] < m.oy+m.h);
+    if (globalAxis && (reference || (touchesNetwork && spansAxis && !visibleHalf.has(c)))) {
       let inside = 0, overlap = 0;
       for (let i=0; i<m.data.length; i++) if (m.data[i]) {
         inside++;
@@ -458,6 +503,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
         if (isInside(m,Math.floor(x),Math.floor(y))) overlap++;
       }
       const score = overlap / (2*inside-overlap);
+
       if (score >= 0.94) axis = {...globalAxis,score};
     }
     if (!axis && params.symmetry && !occluded && !touchesNetwork) {
@@ -728,13 +774,217 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   // Simetría global: figuras gemelas a ambos lados del eje se reflejan exactamente.
   if (globalAxis) mirrorTwins(layers, globalAxis);
 
+  const attachedLoops = new Map<string,string>();
   if (ink && ink.branched.some(label => label >= 0)) {
     const mask = Uint8Array.from(ink.branched, label => Number(label >= 0));
     const radius = distanceTransform(mask, W, H);
     const skeleton = thin(mask, W, H);
     let n = 0;
-    const runs = skeletonPaths(skeleton, W, H, Math.max(2, ink.width * 0.45));
-    for (const points of resolveCrossings(runs, mask, radius, W, ink.width)) {
+    let runs = skeletonPaths(skeleton, W, H, Math.max(2, ink.width * 0.45));
+    // La región de relleno llega hasta el eje de la tinta. Muestrear a ambos
+    // lados identifica las ramas que delimitan una misma pieza superpuesta.
+    const circleEnds = new Map<Vec,Vec>();
+    const circles = inkCircles.filter(({shape,width}) => {
+      const center:Vec=[shape.cx,shape.cy];
+      const onRing=(p:Vec)=>Math.abs(dist(p,center)-shape.r)<=Math.max(1.5,width*0.48);
+      const perimeter=runs.filter(run=>onRing(run[0]) && onRing(run[run.length-1]) && run.every(onRing));
+      const degree=new Map<number,number>();
+      const key=(p:Vec)=>Math.floor(p[1])*W+Math.floor(p[0]);
+      for (const run of perimeter) for (const p of [run[0],run[run.length-1]]) {
+        degree.set(key(p),(degree.get(key(p))??0)+1);
+      }
+      if (degree.size<2 || [...degree.values()].some(n=>n!==2)) return false;
+      const angles=new Set(perimeter.flat().map(p=>Math.floor((Math.atan2(p[1]-shape.cy,p[0]-shape.cx)+Math.PI)*12/Math.PI)%24));
+      if (angles.size<24) return false;
+      const used=new Set(perimeter);
+      runs=runs.filter(run=>!used.has(run));
+      for (const run of runs) for (const p of [run[0],run[run.length-1]]) {
+        if (!degree.has(key(p))) continue;
+        const [dx,dy]=norm(sub(p,center));
+        circleEnds.set(p,[shape.cx+dx*shape.r,shape.cy+dy*shape.r]);
+      }
+      return true;
+    });
+    const boundaries = new Map<number, number[]>();
+    if (pairedDetails.size) runs.forEach((run, index) => {
+      const votes = new Map<number, number>();
+      const offset = Math.max(1, Math.ceil(ink.width * 0.55));
+      for (const [x,y] of run) {
+        const nearby = new Set<number>();
+        for (const [dx,dy] of [[offset,0],[-offset,0],[0,offset],[0,-offset]]) {
+          const px = Math.floor(x) + dx, py = Math.floor(y) + dy;
+          if (px >= 0 && px < W && py >= 0 && py < H) nearby.add(cc.comp[py*W+px]);
+        }
+        for (const c of nearby) if (pairedDetails.has(c)) votes.set(c,(votes.get(c) ?? 0)+1);
+      }
+      for (const [c,count] of votes) if (count >= run.length*0.8) {
+        if (!boundaries.has(c)) boundaries.set(c,[]);
+        boundaries.get(c)!.push(index);
+      }
+    });
+    let chains = resolveCrossings(runs, mask, radius, W, ink.width, boundaries.values());
+    const cornerContacts = new Map<string,Vec>();
+    const joinedBorders = new Map<Vec[],BezierPath>();
+    // En una T exterior, el esqueleto se mete hacia el relleno. Reubicar
+    // el encuentro a medio grosor del borde visible y repartir el ajuste
+    // entre sus tres ramas antes de aproximarlas por curvas independientes.
+    if (boundaries.size) {
+      const exterior = distanceTransform(mask.map((v,i)=>Number(!!v || (cc.comp[i]!==bg && q.labels[i]>=0))),W,H);
+      const detailRuns = new Set([...boundaries.values()].flat());
+      const joints = new Map<string,{point:Vec; widths:number[]; details:number}>();
+      for (const [index,run] of runs.entries()) for (const atStart of [true,false]) {
+        const p=run[atStart?0:run.length-1], key=p.join(',');
+        let joint=joints.get(key);
+        if (!joint) joints.set(key,joint={point:p,widths:[],details:0});
+        if(detailRuns.has(index)) joint.details++;
+        const offset=Math.min(run.length-1,Math.ceil(ink.width*2));
+        const sample=run[atStart?offset:run.length-1-offset];
+        joint.widths.push(radius[Math.floor(sample[1])*W+Math.floor(sample[0])]);
+      }
+      for (const {point,widths,details} of joints.values()) {
+        if (widths.length!==3 || details!==2) continue;
+        const r=widths.sort((a,b)=>a-b)[1], x=Math.floor(point[0]), y=Math.floor(point[1]), i=y*W+x;
+        const shift=exterior[i]-r;
+        if (shift<1 || shift>r || x<2 || x>=W-2 || y<2 || y>=H-2) continue;
+        const normal=norm([exterior[i+2]-exterior[i-2],exterior[i+2*W]-exterior[i-2*W]]);
+        const dx=-shift*normal[0], dy=-shift*normal[1];
+        if (radius[Math.floor(point[1]+dy)*W+Math.floor(point[0]+dx)] < r*0.75) continue;
+        for (const chain of chains) {
+          const hits:number[]=[];
+          chain.forEach((p,j)=>{ if(p[0]===point[0] && p[1]===point[1]) hits.push(j); });
+          // La distancia sobre la rama evita arrastrar otra curva cercana.
+          const original=new Map<number,Vec>();
+          for (const hit of hits) for (const step of [-1,1]) {
+            let d=0;
+            for(let j=hit;j>=0 && j<chain.length;j+=step) {
+              const p=original.get(j) ?? chain[j];
+              if(j!==hit) d+=dist(p,original.get(j-step)!);
+              const t=1-d/(3*r);
+              if(t<=0) break;
+              original.set(j,p);
+              const weight=t*t*(3-2*t);
+              chain[j]=[p[0]+dx*weight,p[1]+dy*weight];
+            }
+          }
+        }
+      }
+    }
+    const symmetricStrokes = new Map<Vec[],BezierPath>();
+    if (globalAxis) {
+      const axis = globalAxis, dim = axis.angle === 90 ? 0 : 1;
+      const ends = new Map<string,{index:number; reverse:boolean}[]>();
+      for (const [index,chain] of chains.entries()) {
+        for (const reverse of [false,true]) {
+          const point = chain[reverse ? chain.length-1 : 0], key = point.join(',');
+          if (!ends.has(key)) ends.set(key,[]);
+          ends.get(key)!.push({index,reverse});
+        }
+      }
+      const removed = new Set<number>();
+      for (const joint of ends.values()) {
+        for (let i=0;i<joint.length;i++) for(let j=i+1;j<joint.length;j++) {
+          const a=joint[i], b=joint[j];
+          if (a.index===b.index || removed.has(a.index) || removed.has(b.index)) continue;
+          const first=chains[a.index], second=chains[b.index];
+          const p=first[a.reverse?0:first.length-1], q=second[b.reverse?0:second.length-1];
+          if (Math.abs(p[dim]-q[dim])<8*ink.width || dist(reflectPoint(p,axis),q)>ink.width*0.6) continue;
+          const joined=[...(a.reverse?first:[...first].reverse()),...(b.reverse?[...second].reverse():second).slice(1)];
+          const path=mirrorInkStroke(joined,axis,mask,radius,W,ink.width,tol);
+          if (!path) continue;
+          symmetricStrokes.set(joined,path);
+          chains[a.index]=joined;
+          removed.add(b.index);
+        }
+      }
+      // Un borde central puede acabar en dos esquinas en T. En cada una,
+      // seguir la rama que sale hacia fuera y conservar el vértice de la figura.
+      for (const [index,mid] of chains.entries()) {
+        if (removed.has(index) || symmetricStrokes.has(mid)) continue;
+        const start=mid[0], end=mid[mid.length-1];
+        if (Math.abs(start[dim]-end[dim])<8*ink.width || dist(reflectPoint(start,axis),end)>ink.width*0.6) continue;
+        const extend = (side:Vec[]) => {
+          const origin=side[0], group=ends.get(origin.join(','));
+          if (group?.length!==3) return null;
+          const sign=Math.sign(origin[dim]-axis.p[dim]);
+          const candidates=group.filter(e=>e.index!==index && !removed.has(e.index)).map(e=>{
+            const run=e.reverse?[...chains[e.index]].reverse():chains[e.index];
+            const reach=run.find(p=>dist(p,origin)>=ink.width*1.6);
+            return {run,id:e.index,out:reach?sign*norm(sub(reach,origin))[dim]:0};
+          }).sort((a,b)=>b.out-a.out);
+          if(candidates.length!==2 || candidates[0].out<0.55 || candidates[0].out-candidates[1].out<0.45) return null;
+          const arm=candidates[0];
+          const ray=(run:Vec[])=>{
+            const i=run.findIndex(p=>dist(origin,p)>=ink.width*1.1);
+            const j=run.findIndex(p=>dist(origin,p)>=ink.width*2.2);
+            return i>=0 && j>i ? {i,p:run[i],d:sub(run[j],run[i])} : null;
+          };
+          const u=ray(side), v=ray(arm.run);
+          if (!u || !v || -sign*norm(u.d)[dim]<0.75) return null;
+          const tip=intersectLines(u.p,u.d,v.p,v.d);
+          if (!tip || dist(tip,origin)>ink.width*1.4) return null;
+          const inside=(p:Vec)=>!!mask[Math.floor(p[1])*W+Math.floor(p[0])];
+          if (![u.p,v.p].every(p=>dedupe([tip,p]).every(inside))) return null;
+          return {arm,tip,cut:u.i,armCut:v.i};
+        };
+        const left=extend(mid), right=extend([...mid].reverse());
+        if(!left || !right || left.arm.id===right.arm.id || left.cut+right.cut>=mid.length) continue;
+        cornerContacts.set(start.join(','),left.tip);
+        cornerContacts.set(end.join(','),right.tip);
+        const sections=[
+          [...left.arm.run.slice(left.armCut)].reverse().concat([left.tip]),
+          [left.tip,...mid.slice(left.cut,mid.length-right.cut),right.tip],
+          [right.tip,...right.arm.run.slice(right.armCut)]
+        ];
+        for (const [part,k] of [[sections[0],0],[sections[2],sections[2].length-1]] as const) {
+          const contact=circleEnds.get(part[k]);
+          if (contact) part[k]=contact;
+        }
+        const fitted=sections.map(part=>{
+          const run=dedupe(part);
+          const centered=centerStroke(run,mask,W,ink!.width);
+          centered[0]=run[0]; centered[centered.length-1]=run[run.length-1];
+          const smooth=smoothOpen(centered,ink!.width*0.22);
+          return fitOpen(smooth,Math.min(tol,ink!.width*0.09));
+        });
+        const combined=sections.flat();
+        joinedBorders.set(combined,{start:combined[0],segs:fitted.flat()});
+        chains[index]=combined;
+        removed.add(left.arm.id); removed.add(right.arm.id);
+      }
+      chains=chains.filter((_,i)=>!removed.has(i));
+    }
+    // Un lazo que toca otra línea empieza en la unión con la rama más larga.
+    // El esqueleto puede representar una unión por varios píxeles vecinos.
+    const endpoints = new Map<number, {point: Vec; length: number; id:string}>();
+    for (const [index,chain] of chains.entries()) {
+      if (joinedBorders.has(chain) || dist(chain[0],chain[chain.length-1]) === 0) continue;
+      const length = chain.reduce((sum,p,i) => sum + (i ? dist(p,chain[i-1]) : 0), 0);
+      for (const point of [chain[0], chain[chain.length-1]]) {
+        const key = Math.floor(point[1])*W + Math.floor(point[0]);
+        if (length > (endpoints.get(key)?.length ?? 0)) endpoints.set(key,{point,length,id:`tinta-${index+1}`});
+      }
+    }
+    const pinned = new Set<Vec>();
+    const anchors = new Map<Vec[], {index:number; point:Vec; id:string}>();
+    for (const chain of chains) {
+      if (dist(chain[0],chain[chain.length-1]) !== 0) continue;
+      let longest = 0, nearest = Infinity;
+      for (let i = 0; i < chain.length-1; i++) {
+        const p = chain[i];
+        for (let dy=-1; dy<=1; dy++) for (let dx=-1; dx<=1; dx++) {
+          const end = endpoints.get((Math.floor(p[1])+dy)*W + Math.floor(p[0])+dx);
+          if (!end) continue;
+          const gap = dist(p,end.point);
+          if (gap > Math.SQRT2 || end.length < longest || (end.length === longest && gap >= nearest)) continue;
+          anchors.set(chain,{index:i,point:end.point,id:end.id});
+          longest = end.length;
+          nearest = gap;
+        }
+      }
+      const anchor = anchors.get(chain);
+      if (anchor) pinned.add(anchor.point);
+    }
+    for (const points of chains) {
       // En una unión el radio inscrito incluye las ramas vecinas. La mediana
       // a lo largo del tramo estima el grosor sin engordar todo el trazo.
       const radii = points.map(([x, y]) => radius[Math.floor(y) * W + Math.floor(x)]).sort((a, b) => a - b);
@@ -745,32 +995,174 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       const error = Math.min(tol, Math.max(0.4, width * 0.09));
       const centered = centerStroke(points, mask, W, width);
       let path: BezierPath;
-      if (closed) {
+      const anchor = anchors.get(points);
+      const symmetric=symmetricStrokes.get(points);
+      const border=joinedBorders.get(points);
+      if (border || symmetric) {
+        path=border ?? symmetric!;
+      } else if (anchor) {
+        const ring = smoothClosed(centered.slice(0,-1), smooth);
+        const ordered = [anchor.point, ...ring.slice(anchor.index+1), ...ring.slice(0,anchor.index), anchor.point];
+        path = {start:anchor.point, segs:fitOpen(dedupe(ordered),error), closed:true};
+        attachedLoops.set(`tinta-${n+1}`,anchor.id);
+      } else if (closed) {
         const ring = smoothClosed(centered.slice(0, -1), smooth);
         path = { ...fitClosed(ring, [], error), closed: true };
       } else {
+        if (pinned.has(first)) centered[0] = first;
+        if (pinned.has(last)) centered[centered.length-1] = last;
+        if (circleEnds.has(first)) centered[0] = circleEnds.get(first)!;
+        if (circleEnds.has(last)) centered[centered.length-1] = circleEnds.get(last)!;
+        for (const [point,at,step] of [[first,0,1],[last,centered.length-1,-1]] as const) {
+          const corner=cornerContacts.get(point.join(','));
+          if (!corner) continue;
+          let j=at;
+          while(j+step>=0 && j+step<centered.length && dist(centered[j],point)<width) j+=step;
+          const count=Math.abs(j-at);
+          for(let k=0;k<count;k++) {
+            const t=k/count, next=centered[j];
+            centered[at+k*step]=[corner[0]+t*(next[0]-corner[0]),corner[1]+t*(next[1]-corner[1])];
+          }
+        }
         const run = smoothOpen(centered, smooth);
         path = { start: run[0], segs: fitOpen(run, error) };
       }
       const shape: Shape = { type: 'strokes', paths: [path] };
       const layer = base('stroke', shape, shape, 'none', -1, 0, points.length * width);
       n++;
-      layers.push({ ...layer, stroke: { width, color: q.hex[ink.label] }, name: `Contorno ${n}`, id: `tinta-${n}` });
+      layers.push({ ...layer, symmetry:symmetric ? globalAxis : null, stroke: { width, color: q.hex[ink.label] }, name: `Contorno ${n}`, id: `tinta-${n}` });
+    }
+    for (const {shape,width,fill} of circles) {
+      const layer=base('circle',shape,shape,fill,-1,0,Math.PI*shape.r**2);
+      const index=counters.circle=(counters.circle??0)+1;
+      layers.push({...layer,id:`anillo-${index}`,name:`Círculo ${index}`,recognized:shape,stroke:{color:q.hex[ink.label],width}});
     }
   }
 
   // Escalar a coordenadas de la imagen original
   const inv = 1 / scale;
   const out = scale === 1 ? layers : layers.map((l) => scaleLayer(l, inv));
+  const simplified = out.map(layer => simplifyLayer(layer, params.tolerance, attachedLoops.has(layer.id)));
+  const byId = new Map(simplified.map(layer => [layer.id,layer]));
+  for (const [loopId,branchId] of attachedLoops) {
+    const loop = byId.get(loopId), branch = byId.get(branchId);
+    if (loop?.shape.type !== 'strokes' || branch?.shape.type !== 'strokes') continue;
+    const ring = loop.shape.paths[0], stem = branch.shape.paths[0];
+    if (!ring.segs.length || !stem.segs.length) continue;
+    const incoming = dist(stem.start,ring.start) < 1e-6 ? reverseStroke(stem) : stem;
+    const tip = incoming.segs[incoming.segs.length-1];
+    if (dist(tip.p,ring.start) > 1e-6) continue;
+    // Recorrer primero el lado del lazo que continúa la tangente de la rama.
+    const tangent = norm(sub(tip.p,tip.c2));
+    const forward = norm(sub(ring.segs[0].c1,ring.start));
+    const backward = norm(sub(ring.segs[ring.segs.length-1].c2,ring.start));
+    const turn = dot(tangent,forward) >= dot(tangent,backward) ? ring : reverseStroke(ring);
+    const shape: Shape = {type:'strokes',paths:[{start:incoming.start,segs:[...incoming.segs,...turn.segs]}]};
+    branch.shape = branch.freeform = shape;
+    branch.area += loop.area;
+    byId.delete(loopId);
+  }
   const ga = globalAxis && { ...globalAxis, p: [globalAxis.p[0] * inv, globalAxis.p[1] * inv] as Vec };
+  if (ga && params.reconstructHidden) {
+    for (const circle of byId.values()) {
+      if (circle.shape.type !== 'circle' || !circle.id.startsWith('anillo-')) continue;
+      reconnectBehindCircle(byId,circle.shape,ga);
+    }
+  }
   onProgress({ stage: 'Listo', value: 1 });
   return {
-    width: src.width, height: src.height, layers: out.map(layer => simplifyLayer(layer, params.tolerance)), palette: q.hex, globalAxis: ga,
+    width: src.width, height: src.height, layers: [...byId.values()], palette: q.hex, globalAxis: ga,
     stats: { regions: cc.count, ms: Math.round(performance.now() - t0), workScale: scale },
   };
 }
 
 // ───────────────────────── utilidades ─────────────────────────
+
+/** El arco visible al otro lado del eje permite identificar qué dos trazos
+ * continúan bajo una pieza circular, aun si también llega allí un cordón. */
+function reconnectBehindCircle(layers:Map<string,Layer>, circle:Extract<Shape,{type:'circle'}>, axis:SymmetryAxis) {
+  const center:Vec=[circle.cx,circle.cy];
+  const contacts=[];
+  for (const layer of layers.values()) {
+    if (layer.shape.type!=='strokes' || layer.shape.paths.length!==1 || !layer.stroke) continue;
+    const path=layer.shape.paths[0];
+    if (path.closed || !path.segs.length) continue;
+    for (const run of [path,reverseStroke(path)]) {
+      if (Math.abs(dist(run.start,center)-circle.r)>0.01) continue;
+      contacts.push({layer,run,width:layer.stroke.width});
+    }
+  }
+  for (const parent of contacts) {
+    const spine=parent.run;
+    const mirrorCenter=reflectPoint(center,axis);
+    if (dist(center,mirrorCenter)<circle.r*3) continue;
+    const reference=sampleLoop(spine,48);
+    reference.push(spine.segs[spine.segs.length-1].p);
+    if (!reference.some(p=>dist(p,mirrorCenter)<circle.r)) continue;
+    const candidates=contacts.filter(c=>c.layer!==parent.layer && c.layer.stroke!.color===parent.layer.stroke!.color &&
+      Math.abs(c.width-parent.width)<parent.width*0.2).map(c=>{
+      const samples=sampleLoop(c.run,32);
+      samples.push(c.run.segs[c.run.segs.length-1].p);
+      const visible=samples.filter(p=>dist(p,center)>circle.r+c.width*0.5);
+      if (visible.length<2 || !visible.some(p=>dist(p,center)>circle.r+2*c.width)) return null;
+      let worst=0;
+      for (const p of visible) {
+        const mirror=reflectPoint(p,axis);
+        let nearest=Infinity;
+        for(let i=1;i<reference.length;i++) nearest=Math.min(nearest,segDist(mirror,reference[i-1],reference[i]));
+        worst=Math.max(worst,nearest);
+      }
+      return {c,error:worst};
+    }).filter(v=>v!==null).filter(v=>v.error<parent.width*0.55);
+    if (candidates.length!==1) continue;
+    const next=candidates[0].c, incoming=reverseStroke(spine);
+    const p=spine.start, q=next.run.start, span=dist(p,q);
+    // Los controles quedan dentro del disco: la unión se mantiene bajo el botón.
+    const control=(start:Vec,handle:Vec):Vec=>{
+      const d=norm(sub(start,handle));
+      const reach=Math.min(span/3, Math.max(0,-2*dot(sub(start,center),d)));
+      return [start[0]+reach*d[0],start[1]+reach*d[1]];
+    };
+    const bridge={p:q,c1:control(p,spine.segs[0].c1),c2:control(q,next.run.segs[0].c1)};
+    const shape:Shape={type:'strokes',paths:[{start:incoming.start,segs:[...incoming.segs,bridge,...next.run.segs]}]};
+    parent.layer.shape=parent.layer.freeform=shape;
+    parent.layer.area+=next.layer.area+span*parent.width;
+    parent.layer.reconstructed=true;
+    layers.delete(next.layer.id);
+    return;
+  }
+}
+
+/** Reconstruye un perfil abierto cuando su reflejo sigue el mismo recorrido de tinta. */
+function mirrorInkStroke(points:Vec[], axis:SymmetryAxis, mask:Uint8Array, radius:Float32Array, W:number, width:number, tol:number):BezierPath|null {
+  const dim=axis.angle===90?0:1, side=(p:Vec)=>p[dim]-axis.p[dim];
+  let cut=-1;
+  for(let i=1;i<points.length;i++) if ((side(points[i])>=0)!==(side(points[i-1])>=0)) {
+    if(cut>=0) return null;
+    cut=i;
+  }
+  if(cut<1) return null;
+  const a=points[cut-1], b=points[cut], t=-side(a)/(side(b)-side(a));
+  const center:Vec=[a[0]+t*(b[0]-a[0]),a[1]+t*(b[1]-a[1])];
+  const halves=[points.slice(0,cut),points.slice(cut).reverse()];
+  const pixels=(p:Vec)=>Math.floor(p[1])*W+Math.floor(p[0]);
+  const scores=halves.map(half=>{
+    let excess=0;
+    for(const p of half) {
+      const mirror=reflectPoint(p,axis);
+      if(!mask[pixels(mirror)]) return Infinity;
+      // Un cruce engrosa el esqueleto localmente. Preferir la mitad despejada.
+      excess+=Math.max(0,radius[pixels(p)]-width*0.65)**2;
+    }
+    return excess/half.length;
+  });
+  if(!scores.every(Number.isFinite)) return null;
+  const half=halves[scores[0]<=scores[1]?0:1];
+  const smooth=smoothOpen([...half,center],Math.max(1,width*0.22));
+  const segs=fitOpen(smooth,Math.min(tol,width*0.1));
+  const reflected=reverseStroke({start:reflectPoint(smooth[0],axis),segs:segs.map(s=>({...s,c1:reflectPoint(s.c1,axis),c2:reflectPoint(s.c2,axis),p:reflectPoint(s.p,axis)}))});
+  return {start:smooth[0],segs:[...segs,...reflected.segs]};
+}
 
 /** Remuestrea una polilínea a pasos de ~1 px (los empalmes y prolongaciones dejan saltos). */
 function dedupe(p: Vec[]): Vec[] {

@@ -164,7 +164,7 @@ function fitCorners(loop: BezierPath, limit:number, spans=cornerSpans(loop)): Be
   return segs.length < loop.segs.length ? {...loop,start:spans[0][0][0],segs} : null;
 }
 
-export function simplifyLayer(layer: Layer, tolerance: number): Layer {
+export function simplifyLayer(layer: Layer, tolerance: number, keepStrokeStart = false): Layer {
   const limit = Math.min(2, tolerance, layer.stroke ? layer.stroke.width / 5 : Infinity);
   const cornerLimit = Math.min(6, 3*tolerance, layer.stroke ? layer.stroke.width / 5 : Infinity);
   function simplifyLoop(loop: BezierPath, closed: boolean) {
@@ -215,7 +215,7 @@ export function simplifyLayer(layer: Layer, tolerance: number): Layer {
       return loop === s.loop ? s : { ...s, loop };
     }
     if (s.type !== 'strokes') return s;
-    const paths = s.paths.map(p => simplifyLoop(p, !!p.closed));
+    const paths = s.paths.map(p => keepStrokeStart && p.closed ? simplifyPath(p, limit, true) : simplifyLoop(p, !!p.closed));
     return paths.every((p,i) => p === s.paths[i]) ? s : { ...s, paths };
   }
   const shape = simplify(layer.shape), holes = layer.holes.map(simplify);
