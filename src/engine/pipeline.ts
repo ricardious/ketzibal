@@ -136,6 +136,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   const globalAxis = params.symmetry ? detectGlobalSymmetry(q.labels, W, H) : null;
   const visibleHalf = new Map<number, Vec | null>();
   const pairedDetails = new Set<number>();
+  const inkCircles: { shape: Extract<Shape,{type:'circle'}>; width:number; fill:string }[] = [];
   const pendingAbsorb: number[] = [];
   if (ink) {
     const fg = new Int32Array(W * H);
@@ -145,6 +146,38 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     // con las regiones de color ya expandidas, sin abrir rendijas entre las piezas.
     const interiors = Int32Array.from(fg, (v,i) => v && !ink!.mask[i] ? 1 : 0);
     const basins = components(interiors, W, H);
+    if (params.detectShapes) {
+      const stats = regionStats(basins,W,H);
+      for (let b=0; b<basins.count; b++) {
+        if (!basins.label[b] || stats.border[b] || stats.area[b]<20) continue;
+        const w=stats.x1[b]-stats.x0[b]+1, h=stats.y1[b]-stats.y0[b]+1;
+        if (Math.abs(w-h)>Math.max(1,0.08*w)) continue;
+        const cx=(stats.x0[b]+stats.x1[b]+1)/2, cy=(stats.y0[b]+stats.y1[b]+1)/2;
+        const inner=Math.sqrt(stats.area[b]/Math.PI);
+        if (Math.abs(inner-(w+h)/4)>Math.max(0.6,inner*0.06)) continue;
+        const widths:number[]=[];
+        for (let i=0;i<48;i++) {
+          const dx=Math.cos(i*Math.PI/24), dy=Math.sin(i*Math.PI/24);
+          const pixel=(r:number) => {
+            const x=Math.floor(cx+r*dx), y=Math.floor(cy+r*dy);
+            return x>=0 && x<W && y>=0 && y<H ? y*W+x : -1;
+          };
+          let r=0;
+          while (r<inner*1.3+2 && basins.comp[pixel(r)]===b) r+=0.5;
+          if (Math.abs(r-inner)>Math.max(1.2,inner*0.10) || ink.branched[pixel(r)]<0) break;
+          const edge=r;
+          while (r-edge<ink.width*4 && ink.mask[pixel(r)]) r+=0.5;
+          widths.push(r-edge);
+        }
+        if (widths.length!==48) continue;
+        widths.sort((a,b)=>a-b);
+        // Los radios que coinciden con una rama sobreestiman el grosor.
+        const width=widths[16];
+        if (width<2 || widths[24]>1.35*width) continue;
+        inkCircles.push({shape:{type:'circle',cx,cy,r:inner+width/2},width,
+          fill:q.hex[q.labels[Math.floor(cy)*W+Math.floor(cx)]]});
+      }
+    }
     const votes = Array.from({length:cc.count}, () => new Map<number,number>());
     for (let i=0; i<fg.length; i++) {
       if (!interiors[i]) continue;
@@ -744,9 +777,31 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     const radius = distanceTransform(mask, W, H);
     const skeleton = thin(mask, W, H);
     let n = 0;
-    const runs = skeletonPaths(skeleton, W, H, Math.max(2, ink.width * 0.45));
+    let runs = skeletonPaths(skeleton, W, H, Math.max(2, ink.width * 0.45));
     // La región de relleno llega hasta el eje de la tinta. Muestrear a ambos
     // lados identifica las ramas que delimitan una misma pieza superpuesta.
+    const circleEnds = new Map<Vec,Vec>();
+    const circles = inkCircles.filter(({shape,width}) => {
+      const center:Vec=[shape.cx,shape.cy];
+      const onRing=(p:Vec)=>Math.abs(dist(p,center)-shape.r)<=Math.max(1.5,width*0.48);
+      const perimeter=runs.filter(run=>onRing(run[0]) && onRing(run[run.length-1]) && run.every(onRing));
+      const degree=new Map<number,number>();
+      const key=(p:Vec)=>Math.floor(p[1])*W+Math.floor(p[0]);
+      for (const run of perimeter) for (const p of [run[0],run[run.length-1]]) {
+        degree.set(key(p),(degree.get(key(p))??0)+1);
+      }
+      if (degree.size<2 || [...degree.values()].some(n=>n!==2)) return false;
+      const angles=new Set(perimeter.flat().map(p=>Math.floor((Math.atan2(p[1]-shape.cy,p[0]-shape.cx)+Math.PI)*12/Math.PI)%24));
+      if (angles.size<24) return false;
+      const used=new Set(perimeter);
+      runs=runs.filter(run=>!used.has(run));
+      for (const run of runs) for (const p of [run[0],run[run.length-1]]) {
+        if (!degree.has(key(p))) continue;
+        const [dx,dy]=norm(sub(p,center));
+        circleEnds.set(p,[shape.cx+dx*shape.r,shape.cy+dy*shape.r]);
+      }
+      return true;
+    });
     const boundaries = new Map<number, number[]>();
     if (pairedDetails.size) runs.forEach((run, index) => {
       const votes = new Map<number, number>();
@@ -819,6 +874,8 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       } else {
         if (pinned.has(first)) centered[0] = first;
         if (pinned.has(last)) centered[centered.length-1] = last;
+        if (circleEnds.has(first)) centered[0] = circleEnds.get(first)!;
+        if (circleEnds.has(last)) centered[centered.length-1] = circleEnds.get(last)!;
         const run = smoothOpen(centered, smooth);
         path = { start: run[0], segs: fitOpen(run, error) };
       }
@@ -826,6 +883,11 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       const layer = base('stroke', shape, shape, 'none', -1, 0, points.length * width);
       n++;
       layers.push({ ...layer, stroke: { width, color: q.hex[ink.label] }, name: `Contorno ${n}`, id: `tinta-${n}` });
+    }
+    for (const {shape,width,fill} of circles) {
+      const layer=base('circle',shape,shape,fill,-1,0,Math.PI*shape.r**2);
+      const index=counters.circle=(counters.circle??0)+1;
+      layers.push({...layer,id:`anillo-${index}`,name:`Círculo ${index}`,recognized:shape,stroke:{color:q.hex[ink.label],width}});
     }
   }
 
