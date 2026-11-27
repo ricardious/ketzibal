@@ -492,7 +492,10 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     // eje de simetría propio (o global si coincide)
     let axis: SymmetryAxis | null = null;
     const reference = visibleHalf.get(c);
-    if (reference && globalAxis) {
+    const spansAxis = globalAxis && (globalAxis.angle === 90
+      ? m.ox < globalAxis.p[0] && globalAxis.p[0] < m.ox+m.w
+      : m.oy < globalAxis.p[1] && globalAxis.p[1] < m.oy+m.h);
+    if (globalAxis && (reference || (touchesNetwork && spansAxis && !visibleHalf.has(c)))) {
       let inside = 0, overlap = 0;
       for (let i=0; i<m.data.length; i++) if (m.data[i]) {
         inside++;
@@ -819,7 +822,36 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
         boundaries.get(c)!.push(index);
       }
     });
-    const chains = resolveCrossings(runs, mask, radius, W, ink.width, boundaries.values());
+    let chains = resolveCrossings(runs, mask, radius, W, ink.width, boundaries.values());
+    const symmetricStrokes = new Map<Vec[],BezierPath>();
+    if (globalAxis) {
+      const axis = globalAxis, dim = axis.angle === 90 ? 0 : 1;
+      const ends = new Map<string,{index:number; reverse:boolean}[]>();
+      for (const [index,chain] of chains.entries()) {
+        for (const reverse of [false,true]) {
+          const point = chain[reverse ? chain.length-1 : 0], key = point.join(',');
+          if (!ends.has(key)) ends.set(key,[]);
+          ends.get(key)!.push({index,reverse});
+        }
+      }
+      const removed = new Set<number>();
+      for (const joint of ends.values()) {
+        for (let i=0;i<joint.length;i++) for(let j=i+1;j<joint.length;j++) {
+          const a=joint[i], b=joint[j];
+          if (a.index===b.index || removed.has(a.index) || removed.has(b.index)) continue;
+          const first=chains[a.index], second=chains[b.index];
+          const p=first[a.reverse?0:first.length-1], q=second[b.reverse?0:second.length-1];
+          if (Math.abs(p[dim]-q[dim])<8*ink.width || dist(reflectPoint(p,axis),q)>ink.width*0.6) continue;
+          const joined=[...(a.reverse?first:[...first].reverse()),...(b.reverse?[...second].reverse():second).slice(1)];
+          const path=mirrorInkStroke(joined,axis,mask,radius,W,ink.width,tol);
+          if (!path) continue;
+          symmetricStrokes.set(joined,path);
+          chains[a.index]=joined;
+          removed.add(b.index);
+        }
+      }
+      chains=chains.filter((_,i)=>!removed.has(i));
+    }
     // Un lazo que toca otra línea empieza en la unión con la rama más larga.
     // El esqueleto puede representar una unión por varios píxeles vecinos.
     const endpoints = new Map<number, {point: Vec; length: number; id:string}>();
@@ -863,7 +895,10 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       const centered = centerStroke(points, mask, W, width);
       let path: BezierPath;
       const anchor = anchors.get(points);
-      if (anchor) {
+      const symmetric=symmetricStrokes.get(points);
+      if (symmetric) {
+        path=symmetric;
+      } else if (anchor) {
         const ring = smoothClosed(centered.slice(0,-1), smooth);
         const ordered = [anchor.point, ...ring.slice(anchor.index+1), ...ring.slice(0,anchor.index), anchor.point];
         path = {start:anchor.point, segs:fitOpen(dedupe(ordered),error), closed:true};
@@ -882,7 +917,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
       const shape: Shape = { type: 'strokes', paths: [path] };
       const layer = base('stroke', shape, shape, 'none', -1, 0, points.length * width);
       n++;
-      layers.push({ ...layer, stroke: { width, color: q.hex[ink.label] }, name: `Contorno ${n}`, id: `tinta-${n}` });
+      layers.push({ ...layer, symmetry:symmetric ? globalAxis : null, stroke: { width, color: q.hex[ink.label] }, name: `Contorno ${n}`, id: `tinta-${n}` });
     }
     for (const {shape,width,fill} of circles) {
       const layer=base('circle',shape,shape,fill,-1,0,Math.PI*shape.r**2);
@@ -923,6 +958,37 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
 }
 
 // ───────────────────────── utilidades ─────────────────────────
+
+/** Reconstruye un perfil abierto cuando su reflejo sigue el mismo recorrido de tinta. */
+function mirrorInkStroke(points:Vec[], axis:SymmetryAxis, mask:Uint8Array, radius:Float32Array, W:number, width:number, tol:number):BezierPath|null {
+  const dim=axis.angle===90?0:1, side=(p:Vec)=>p[dim]-axis.p[dim];
+  let cut=-1;
+  for(let i=1;i<points.length;i++) if ((side(points[i])>=0)!==(side(points[i-1])>=0)) {
+    if(cut>=0) return null;
+    cut=i;
+  }
+  if(cut<1) return null;
+  const a=points[cut-1], b=points[cut], t=-side(a)/(side(b)-side(a));
+  const center:Vec=[a[0]+t*(b[0]-a[0]),a[1]+t*(b[1]-a[1])];
+  const halves=[points.slice(0,cut),points.slice(cut).reverse()];
+  const pixels=(p:Vec)=>Math.floor(p[1])*W+Math.floor(p[0]);
+  const scores=halves.map(half=>{
+    let excess=0;
+    for(const p of half) {
+      const mirror=reflectPoint(p,axis);
+      if(!mask[pixels(mirror)]) return Infinity;
+      // Un cruce engrosa el esqueleto localmente. Preferir la mitad despejada.
+      excess+=Math.max(0,radius[pixels(p)]-width*0.65)**2;
+    }
+    return excess/half.length;
+  });
+  if(!scores.every(Number.isFinite)) return null;
+  const half=halves[scores[0]<=scores[1]?0:1];
+  const smooth=smoothOpen([...half,center],Math.max(1,width*0.22));
+  const segs=fitOpen(smooth,Math.min(tol,width*0.1));
+  const reflected=reverseStroke({start:reflectPoint(smooth[0],axis),segs:segs.map(s=>({...s,c1:reflectPoint(s.c1,axis),c2:reflectPoint(s.c2,axis),p:reflectPoint(s.p,axis)}))});
+  return {start:smooth[0],segs:[...segs,...reflected.segs]};
+}
 
 /** Remuestrea una polilínea a pasos de ~1 px (los empalmes y prolongaciones dejan saltos). */
 function dedupe(p: Vec[]): Vec[] {
