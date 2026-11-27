@@ -134,6 +134,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
   const areaOf = (c: number) => (c < cc.count ? st.area[c] : virt[c - cc.count].area);
   const globalAxis = params.symmetry ? detectGlobalSymmetry(q.labels, W, H) : null;
   const visibleHalf = new Map<number, Vec | null>();
+  const pairedDetails = new Set<number>();
   const pendingAbsorb: number[] = [];
   if (ink) {
     const fg = new Int32Array(W * H);
@@ -257,6 +258,7 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
                 }
               }
               nodes[id].parent=parent;
+              pairedDetails.add(id);
             }
             break;
           }
@@ -741,7 +743,27 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     const skeleton = thin(mask, W, H);
     let n = 0;
     const runs = skeletonPaths(skeleton, W, H, Math.max(2, ink.width * 0.45));
-    for (const points of resolveCrossings(runs, mask, radius, W, ink.width)) {
+    // La región de relleno llega hasta el eje de la tinta. Muestrear a ambos
+    // lados identifica las ramas que delimitan una misma pieza superpuesta.
+    const boundaries = new Map<number, number[]>();
+    if (pairedDetails.size) runs.forEach((run, index) => {
+      const votes = new Map<number, number>();
+      const offset = Math.max(1, Math.ceil(ink.width * 0.55));
+      for (const [x,y] of run) {
+        const nearby = new Set<number>();
+        for (const [dx,dy] of [[offset,0],[-offset,0],[0,offset],[0,-offset]]) {
+          const px = Math.floor(x) + dx, py = Math.floor(y) + dy;
+          if (px >= 0 && px < W && py >= 0 && py < H) nearby.add(cc.comp[py*W+px]);
+        }
+        for (const c of nearby) if (pairedDetails.has(c)) votes.set(c,(votes.get(c) ?? 0)+1);
+      }
+      for (const [c,count] of votes) if (count >= run.length*0.8) {
+        if (!boundaries.has(c)) boundaries.set(c,[]);
+        boundaries.get(c)!.push(index);
+      }
+    });
+    const chains = resolveCrossings(runs, mask, radius, W, ink.width, boundaries.values());
+    for (const points of chains) {
       // En una unión el radio inscrito incluye las ramas vecinas. La mediana
       // a lo largo del tramo estima el grosor sin engordar todo el trazo.
       const radii = points.map(([x, y]) => radius[Math.floor(y) * W + Math.floor(x)]).sort((a, b) => a - b);

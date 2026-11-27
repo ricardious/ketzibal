@@ -7,7 +7,7 @@ interface Link { other: number; trim: number; bridge: Vec[] }
 
 /** Un cruce X se adelgaza a un nodo de cuatro brazos o dos nodos T con un
  * puente corto. En una T se busca una única pareja con continuidad de tinta. */
-export function resolveCrossings(runs: Vec[][], mask: Uint8Array, radius: Float32Array, W: number, width: number): Vec[][] {
+export function resolveCrossings(runs: Vec[][], mask: Uint8Array, radius: Float32Array, W: number, width: number, boundaries: Iterable<number[]> = []): Vec[][] {
   runs = runs.slice();
   const ends = runs.flatMap(r => [r[0], r[r.length - 1]]);
   const groups: number[][] = [];
@@ -63,6 +63,22 @@ export function resolveCrossings(runs: Vec[][], mask: Uint8Array, radius: Float3
   };
 
   const links = new Map<number, Link>(), removed = new Set<number>();
+  // Solo reservar bordes completos: en cada unión del perímetro entran y
+  // salen exactamente dos ramas de la misma región.
+  for (const perimeter of boundaries) {
+    const joints = new Map<number, number[]>();
+    for (const i of perimeter) for (const end of [2*i,2*i+1]) {
+      const key = node[end];
+      if (!joints.has(key)) joints.set(key,[]);
+      joints.get(key)!.push(end);
+    }
+    if ([...joints.values()].some(ids => ids.length !== 2 || ids.some(id => links.has(id)))) continue;
+    for (const [a,b] of joints.values()) {
+      const trim = (id: number) => id % 2 ? runs[id >> 1].length - 1 : 0;
+      links.set(a, {other:b, trim:trim(a), bridge:[]});
+      links.set(b, {other:a, trim:trim(b), bridge:[]});
+    }
+  }
   const attempt = (ids: number[], connector?: number) => {
     if (ids.length !== 4 || new Set(ids.map(id => id >> 1)).size !== 4 || ids.some(id => links.has(id) || removed.has(id >> 1))) return;
     const arms = ids.map(arm);
