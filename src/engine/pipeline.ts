@@ -825,6 +825,50 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     let chains = resolveCrossings(runs, mask, radius, W, ink.width, boundaries.values());
     const cornerContacts = new Map<string,Vec>();
     const joinedBorders = new Map<Vec[],BezierPath>();
+    // En una T exterior, el esqueleto se mete hacia el relleno. Reubicar
+    // el encuentro a medio grosor del borde visible y repartir el ajuste
+    // entre sus tres ramas antes de aproximarlas por curvas independientes.
+    if (boundaries.size) {
+      const exterior = distanceTransform(mask.map((v,i)=>Number(!!v || (cc.comp[i]!==bg && q.labels[i]>=0))),W,H);
+      const detailRuns = new Set([...boundaries.values()].flat());
+      const joints = new Map<string,{point:Vec; widths:number[]; details:number}>();
+      for (const [index,run] of runs.entries()) for (const atStart of [true,false]) {
+        const p=run[atStart?0:run.length-1], key=p.join(',');
+        let joint=joints.get(key);
+        if (!joint) joints.set(key,joint={point:p,widths:[],details:0});
+        if(detailRuns.has(index)) joint.details++;
+        const offset=Math.min(run.length-1,Math.ceil(ink.width*2));
+        const sample=run[atStart?offset:run.length-1-offset];
+        joint.widths.push(radius[Math.floor(sample[1])*W+Math.floor(sample[0])]);
+      }
+      for (const {point,widths,details} of joints.values()) {
+        if (widths.length!==3 || details!==2) continue;
+        const r=widths.sort((a,b)=>a-b)[1], x=Math.floor(point[0]), y=Math.floor(point[1]), i=y*W+x;
+        const shift=exterior[i]-r;
+        if (shift<1 || shift>r || x<2 || x>=W-2 || y<2 || y>=H-2) continue;
+        const normal=norm([exterior[i+2]-exterior[i-2],exterior[i+2*W]-exterior[i-2*W]]);
+        const dx=-shift*normal[0], dy=-shift*normal[1];
+        if (radius[Math.floor(point[1]+dy)*W+Math.floor(point[0]+dx)] < r*0.75) continue;
+        for (const chain of chains) {
+          const hits:number[]=[];
+          chain.forEach((p,j)=>{ if(p[0]===point[0] && p[1]===point[1]) hits.push(j); });
+          // La distancia sobre la rama evita arrastrar otra curva cercana.
+          const original=new Map<number,Vec>();
+          for (const hit of hits) for (const step of [-1,1]) {
+            let d=0;
+            for(let j=hit;j>=0 && j<chain.length;j+=step) {
+              const p=original.get(j) ?? chain[j];
+              if(j!==hit) d+=dist(p,original.get(j-step)!);
+              const t=1-d/(3*r);
+              if(t<=0) break;
+              original.set(j,p);
+              const weight=t*t*(3-2*t);
+              chain[j]=[p[0]+dx*weight,p[1]+dy*weight];
+            }
+          }
+        }
+      }
+    }
     const symmetricStrokes = new Map<Vec[],BezierPath>();
     if (globalAxis) {
       const axis = globalAxis, dim = axis.angle === 90 ? 0 : 1;
