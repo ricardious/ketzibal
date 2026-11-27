@@ -1,7 +1,7 @@
 import { reverseStroke } from './join';
 import { simplifyLayer } from './simplify';
 import { traceContours, type Contour } from './contour';
-import { detectCorners, fitClosed, fitOpen, intersectLines, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
+import { detectCorners, sampleLoop, fitClosed, fitOpen, intersectLines, mapLoop, refineCorner, smoothClosed, smoothOpen } from './curve';
 import { quantize } from './quantize';
 import { cleanupLabels, components, growInto, majoritySmooth, maskHoles, regionMask, regionStats, type Components, type LocalMask, type RegionStats } from './regions';
 import { centerStroke, chainRuns, detectBrownInk, detectInk, distanceTransform, skeletonPaths, thin, type Ink } from './lineart';
@@ -1063,6 +1063,12 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
     byId.delete(loopId);
   }
   const ga = globalAxis && { ...globalAxis, p: [globalAxis.p[0] * inv, globalAxis.p[1] * inv] as Vec };
+  if (ga && params.reconstructHidden) {
+    for (const circle of byId.values()) {
+      if (circle.shape.type !== 'circle' || !circle.id.startsWith('anillo-')) continue;
+      reconnectBehindCircle(byId,circle.shape,ga);
+    }
+  }
   onProgress({ stage: 'Listo', value: 1 });
   return {
     width: src.width, height: src.height, layers: [...byId.values()], palette: q.hex, globalAxis: ga,
@@ -1071,6 +1077,61 @@ export function vectorize(src: RasterImage, params: VectorizeParams, onProgress:
 }
 
 // ───────────────────────── utilidades ─────────────────────────
+
+/** El arco visible al otro lado del eje permite identificar qué dos trazos
+ * continúan bajo una pieza circular, aun si también llega allí un cordón. */
+function reconnectBehindCircle(layers:Map<string,Layer>, circle:Extract<Shape,{type:'circle'}>, axis:SymmetryAxis) {
+  const center:Vec=[circle.cx,circle.cy];
+  const contacts=[];
+  for (const layer of layers.values()) {
+    if (layer.shape.type!=='strokes' || layer.shape.paths.length!==1 || !layer.stroke) continue;
+    const path=layer.shape.paths[0];
+    if (path.closed || !path.segs.length) continue;
+    for (const run of [path,reverseStroke(path)]) {
+      if (Math.abs(dist(run.start,center)-circle.r)>0.01) continue;
+      contacts.push({layer,run,width:layer.stroke.width});
+    }
+  }
+  for (const parent of contacts) {
+    const spine=parent.run;
+    const mirrorCenter=reflectPoint(center,axis);
+    if (dist(center,mirrorCenter)<circle.r*3) continue;
+    const reference=sampleLoop(spine,48);
+    reference.push(spine.segs[spine.segs.length-1].p);
+    if (!reference.some(p=>dist(p,mirrorCenter)<circle.r)) continue;
+    const candidates=contacts.filter(c=>c.layer!==parent.layer && c.layer.stroke!.color===parent.layer.stroke!.color &&
+      Math.abs(c.width-parent.width)<parent.width*0.2).map(c=>{
+      const samples=sampleLoop(c.run,32);
+      samples.push(c.run.segs[c.run.segs.length-1].p);
+      const visible=samples.filter(p=>dist(p,center)>circle.r+c.width*0.5);
+      if (visible.length<2 || !visible.some(p=>dist(p,center)>circle.r+2*c.width)) return null;
+      let worst=0;
+      for (const p of visible) {
+        const mirror=reflectPoint(p,axis);
+        let nearest=Infinity;
+        for(let i=1;i<reference.length;i++) nearest=Math.min(nearest,segDist(mirror,reference[i-1],reference[i]));
+        worst=Math.max(worst,nearest);
+      }
+      return {c,error:worst};
+    }).filter(v=>v!==null).filter(v=>v.error<parent.width*0.55);
+    if (candidates.length!==1) continue;
+    const next=candidates[0].c, incoming=reverseStroke(spine);
+    const p=spine.start, q=next.run.start, span=dist(p,q);
+    // Los controles quedan dentro del disco: la unión se mantiene bajo el botón.
+    const control=(start:Vec,handle:Vec):Vec=>{
+      const d=norm(sub(start,handle));
+      const reach=Math.min(span/3, Math.max(0,-2*dot(sub(start,center),d)));
+      return [start[0]+reach*d[0],start[1]+reach*d[1]];
+    };
+    const bridge={p:q,c1:control(p,spine.segs[0].c1),c2:control(q,next.run.segs[0].c1)};
+    const shape:Shape={type:'strokes',paths:[{start:incoming.start,segs:[...incoming.segs,bridge,...next.run.segs]}]};
+    parent.layer.shape=parent.layer.freeform=shape;
+    parent.layer.area+=next.layer.area+span*parent.width;
+    parent.layer.reconstructed=true;
+    layers.delete(next.layer.id);
+    return;
+  }
+}
 
 /** Reconstruye un perfil abierto cuando su reflejo sigue el mismo recorrido de tinta. */
 function mirrorInkStroke(points:Vec[], axis:SymmetryAxis, mask:Uint8Array, radius:Float32Array, W:number, width:number, tol:number):BezierPath|null {
