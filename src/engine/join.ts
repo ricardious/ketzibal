@@ -2,7 +2,7 @@ import { bez, bezD1, mapLoop } from './curve';
 import type { BezierPath, CubicSeg, Layer, RasterImage, Vec } from './types';
 import { add, dist, dot, lerp, norm, scale, sub } from './vec';
 
-function reverse(path: BezierPath): BezierPath {
+export function reverseStroke(path: BezierPath): BezierPath {
   const starts = [path.start, ...path.segs.map(s => s.p)];
   return { start: starts[starts.length - 1], segs: path.segs.map((s, i) => ({ ...s, p: starts[i], c1: s.c2, c2: s.c1 })).reverse() };
 }
@@ -205,7 +205,7 @@ export function joinStrokes(primary: Layer, members: Layer[], img: RasterImage):
     let result: BezierPath | undefined;
     const junctions: Junction[] = [];
     while (!used.has(entry >> 1)) {
-      const index = entry >> 1, path = entry % 2 ? reverse(paths[index]) : paths[index];
+      const index = entry >> 1, path = entry % 2 ? reverseStroke(paths[index]) : paths[index];
       used.add(index);
       if (!result) result = { ...path, segs: [...path.segs] };
       else result.segs.push(...path.segs);
